@@ -126,12 +126,12 @@ jobs:
         continue-on-error: true
         env:
           APP_HOST: ${{ env.APP_HOST }}
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
           EXPECTED_ARTIFACT_SHA256: ${{ steps.export.outputs.artifact_sha256 }}
         run: |
           set -euo pipefail
           python3 - <<-'PYEOF' | tee smoke-test.log
+          	import base64
           	import hashlib
           	import json
           	import os
@@ -143,8 +143,7 @@ jobs:
           	host = os.environ["APP_HOST"]
           	expected_sha = os.environ["EXPECTED_ARTIFACT_SHA256"]
           	headers = {
-          	    "CF-Access-Client-Id": os.environ["CF_ACCESS_CLIENT_ID"],
-          	    "CF-Access-Client-Secret": os.environ["CF_ACCESS_CLIENT_SECRET"],
+          	    "Authorization": "Basic " + base64.b64encode(("ci:" + os.environ["DASHBOARD_PASSWORD"]).encode()).decode(),
           	}
           	cache_bust = f"?_smoke={int(time.time())}"
 
@@ -255,11 +254,11 @@ jobs:
         if: always() && steps.smoke.outcome == 'failure'
         env:
           APP_HOST: ${{ env.APP_HOST }}
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
         run: |
           set -euo pipefail
           python3 - <<-'PYEOF'
+          	import base64
           	import hashlib
           	import json
           	import os
@@ -270,8 +269,7 @@ jobs:
 
           	host = os.environ["APP_HOST"]
           	headers = {
-          	    "CF-Access-Client-Id": os.environ["CF_ACCESS_CLIENT_ID"],
-          	    "CF-Access-Client-Secret": os.environ["CF_ACCESS_CLIENT_SECRET"],
+          	    "Authorization": "Basic " + base64.b64encode(("ci:" + os.environ["DASHBOARD_PASSWORD"]).encode()).decode(),
           	}
           	cache_bust = f"?_smoke_rollback={int(time.time())}"
 
