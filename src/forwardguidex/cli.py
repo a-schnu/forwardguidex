@@ -70,7 +70,12 @@ def cmd_run_daily(_args) -> None:
     con = db.connect()
     _ingest("all")
     marts.build_marts(con)
-    _send_brief(build_brief(con))
+    # The brief is one section of the snapshot; an LLM outage (e.g. 429) must not
+    # block the market-data export/deploy. Skip it on failure and carry on.
+    try:
+        _send_brief(build_brief(con))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[brief] skipped — LLM unavailable: {exc}")
     print("Daily run complete.")
 
 
