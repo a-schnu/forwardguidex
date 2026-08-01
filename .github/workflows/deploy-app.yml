@@ -276,30 +276,11 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          set -euo pipefail
-          python3 - <<-'PYEOF'
-          	import json
-          	import os
-          	import urllib.request
-
-          	token = os.environ["CLOUDFLARE_API_TOKEN"]
-          	account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
-          	project = os.environ.get("CF_PROJECT_NAME", "fgx-dashboard")
-
-          	url = f"https://api.cloudflare.com/client/v4/accounts/{account}/pages/projects/{project}/deployments?env=production"
-          	req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-          	with urllib.request.urlopen(req, timeout=30) as resp:
-          	    body = json.load(resp)
-
-          	deployments = [d for d in body.get("result", []) if d.get("latest_stage", {}).get("status") == "success"]
-          	prev_id = deployments[0]["id"] if deployments else ""
-
-          	gh_output = os.environ.get("GITHUB_OUTPUT")
-          	with open(gh_output, "a", encoding="utf-8") as f:
-          	    f.write(f"deployment_id={prev_id}\n")
-          	print(f"Previous successful production deployment: {prev_id or '(none found — first deploy)'}")
-          	PYEOF
-        # CF_PROJECT_NAME is inherited from the workflow-level `env:` block above.
+          set -uo pipefail
+          resp=$(curl -sS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"             "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${CF_PROJECT_NAME}/deployments?per_page=25") || true
+          prev_id=$(printf '%s' "$resp" | jq -r '[.result[]? | select(.environment=="production" and .latest_stage.status=="success")][0].id // ""' 2>/dev/null || true)
+          echo "deployment_id=${prev_id:-}" >> "$GITHUB_OUTPUT"
+          echo "Previous successful production deployment: ${prev_id:-none}"
 
       - name: Deploy app/ to Cloudflare Pages (Direct Upload)
         id: deploy_cf
