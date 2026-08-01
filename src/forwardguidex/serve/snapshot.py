@@ -171,11 +171,20 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
         })
 
     # headlines
-    news_df = marts.news(con, limit=12)
-    headlines = [{
-        "topic": _str(h.topic), "title": _str(h.title), "domain": _str(h.domain),
-        "url": _str(h.url), "seendate": _str(h.seendate),
-    } for h in news_df.itertuples()]
+    # Keep only https headlines (the dashboard renders only https links, and the
+    # validator rejects http URLs) — fetch extra, filter, cap at 12.
+    news_df = marts.news(con, limit=40)
+    headlines = []
+    for h in news_df.itertuples():
+        url = _str(h.url)
+        if not url or not url.startswith("https://"):
+            continue
+        headlines.append({
+            "topic": _str(h.topic), "title": _str(h.title), "domain": _str(h.domain),
+            "url": url, "seendate": _str(h.seendate),
+        })
+        if len(headlines) >= 12:
+            break
 
     # brief
     brief = {"markdown": "", "created_at": None}
