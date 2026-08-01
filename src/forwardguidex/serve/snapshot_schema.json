@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forwardguidex.com/schema/snapshot-v1.json",
+  "title": "ForwardGuidex EOD snapshot (schema_version 1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["meta", "indices", "futures", "sectors", "rates", "movers", "headlines", "brief"],
+  "properties": {
+    "meta": { "$ref": "#/$defs/meta" },
+    "indices": { "type": "array", "items": { "$ref": "#/$defs/priceItem" } },
+    "futures": { "type": "array", "items": { "$ref": "#/$defs/priceItem" } },
+    "sectors": { "type": "array", "items": { "$ref": "#/$defs/sector" } },
+    "rates": { "type": "array", "items": { "$ref": "#/$defs/rateItem" } },
+    "movers": { "$ref": "#/$defs/movers" },
+    "headlines": { "type": "array", "items": { "$ref": "#/$defs/headline" } },
+    "brief": { "$ref": "#/$defs/brief" }
+  },
+  "$defs": {
+    "currency": { "type": "string", "enum": ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "HKD"] },
+    "quality": { "type": "string", "enum": ["OK", "PARTIAL", "DEGRADED"] },
+    "ret": { "type": ["number", "null"], "minimum": -100, "maximum": 100 },
+    "tsOrNull": { "type": ["string", "null"], "maxLength": 40 },
+    "priceItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ticker", "currency", "source", "quality"],
+      "properties": {
+        "ticker": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "name": { "type": ["string", "null"], "maxLength": 120 },
+        "last": { "type": ["number", "null"], "minimum": 0, "maximum": 100000000 },
+        "currency": { "$ref": "#/$defs/currency" },
+        "ret_1d": { "$ref": "#/$defs/ret" },
+        "ret_5d": { "$ref": "#/$defs/ret" },
+        "as_of": { "$ref": "#/$defs/tsOrNull" },
+        "source": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "quality": { "$ref": "#/$defs/quality" },
+        "role": { "type": "string", "enum": ["etf", "constituent", "index", "future", "name"] },
+        "sector": { "type": ["string", "null"], "maxLength": 80 }
+      }
+    },
+    "rateItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["series_id", "value", "source", "quality"],
+      "properties": {
+        "series_id": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "name": { "type": ["string", "null"], "maxLength": 120 },
+        "value": { "type": ["number", "null"], "minimum": -10, "maximum": 40 },
+        "chg": { "type": ["number", "null"], "minimum": -20, "maximum": 20 },
+        "as_of": { "$ref": "#/$defs/tsOrNull" },
+        "source": { "type": ["string", "null"], "maxLength": 24 },
+        "quality": { "$ref": "#/$defs/quality" }
+      }
+    },
+    "sector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "label", "etfs", "constituents"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "label": { "type": ["string", "null"], "maxLength": 80 },
+        "avg_ret_1d": { "$ref": "#/$defs/ret" },
+        "avg_ret_5d": { "$ref": "#/$defs/ret" },
+        "etfs": { "type": "array", "items": { "$ref": "#/$defs/priceItem" } },
+        "constituents": { "type": "array", "items": { "$ref": "#/$defs/priceItem" } }
+      }
+    },
+    "movers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gainers", "losers"],
+      "properties": {
+        "gainers": { "type": "array", "maxItems": 12, "items": { "$ref": "#/$defs/priceItem" } },
+        "losers": { "type": "array", "maxItems": 12, "items": { "$ref": "#/$defs/priceItem" } }
+      }
+    },
+    "headline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url"],
+      "properties": {
+        "topic": { "type": ["string", "null"], "maxLength": 60 },
+        "title": { "type": ["string", "null"], "maxLength": 400 },
+        "domain": { "type": ["string", "null"], "maxLength": 120 },
+        "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+        "seendate": { "type": ["string", "null"], "maxLength": 40 }
+      }
+    },
+    "brief": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["markdown"],
+      "properties": {
+        "markdown": { "type": "string", "maxLength": 20000 },
+        "created_at": { "$ref": "#/$defs/tsOrNull" }
+      }
+    },
+    "attribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "us_treasury": { "type": "string", "maxLength": 2000 },
+        "ny_fed": { "type": "string", "maxLength": 4000 }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "generated_at", "data_as_of", "oldest_required_source_as_of",
+        "source_received_at", "freshness", "freshness_checked_at", "freshness_rule_version",
+        "cadence", "delivery", "quality", "is_demo", "content_hash", "source",
+        "market_state_at_generation", "attribution"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "data_as_of": { "type": "string", "format": "date-time" },
+        "oldest_required_source_as_of": { "type": "string", "format": "date-time" },
+        "source_received_at": { "type": "string", "format": "date-time" },
+        "freshness": { "type": "string", "enum": ["FRESH", "STALE"] },
+        "freshness_checked_at": { "type": "string", "format": "date-time" },
+        "freshness_rule_version": { "type": "string", "maxLength": 16 },
+        "cadence": { "const": "EOD" },
+        "delivery": { "const": "STATIC" },
+        "quality": { "type": "string", "enum": ["OK", "DEGRADED"] },
+        "is_demo": { "type": "boolean" },
+        "content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "source": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "market_state_at_generation": {
+          "type": "string",
+          "enum": ["PRE_OPEN", "OPEN", "CLOSED", "POST_CLOSE", "HOLIDAY"]
+        },
+        "attribution": { "$ref": "#/$defs/attribution" }
+      }
+    }
+  }
+}

@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ForwardGuidex — EOD Market Dashboard</title>
+<link rel="stylesheet" href="css/base.css" />
+</head>
+<body>
+
+<div class="blobs" aria-hidden="true"><div class="blob b1"></div><div class="blob b2"></div></div>
+
+<div class="demo-ribbon" id="demoRibbon" hidden>DEMO</div>
+
+<header>
+  <div class="wrap"><div class="nav glass">
+    <div class="brand">ForwardGuidex</div>
+    <span class="badge" id="badge" title="Stato impostato dalla pipeline">—</span>
+    <span class="market"><span class="market-dot" id="marketDot"></span><span id="marketLabel" class="muted"></span></span>
+    <span class="spacer"></span>
+    <span class="asof muted">Dati al <span id="dataAsOf">—</span></span>
+    <span class="disclaimer">Non è consulenza finanziaria</span>
+  </div></div>
+</header>
+
+<main id="dashboard">
+
+  <section class="block first">
+    <div class="wrap">
+      <div class="head reveal">
+        <div class="eyebrow">Panoramica</div>
+        <h2>Indici &amp; futures</h2>
+      </div>
+      <div class="kpis" id="kpis"></div>
+    </div>
+  </section>
+
+  <section class="block" id="settori">
+    <div class="wrap">
+      <div class="head reveal">
+        <div class="eyebrow">Settori</div>
+        <h2>Sei settori. Aprili.</h2>
+        <p>Trascina. Tocca per aprire il dettaglio.</p>
+      </div>
+    </div>
+    <div class="wrap">
+      <div class="track" id="track"></div>
+      <div class="dots" id="dots"></div>
+    </div>
+  </section>
+
+  <section class="block" id="tassi">
+    <div class="wrap">
+      <div class="head reveal">
+        <div class="eyebrow">Tassi</div>
+        <h2>Curva Treasury &amp; tassi di riferimento</h2>
+      </div>
+      <div class="rates-strip" id="ratesStrip"></div>
+    </div>
+  </section>
+
+  <section class="block" id="movers">
+    <div class="wrap">
+      <div class="head reveal">
+        <div class="eyebrow">Movimenti</div>
+        <h2>Chi sale, chi scende</h2>
+      </div>
+      <div class="movers reveal">
+        <div class="mv-col glass">
+          <h4 class="mv-h up">Gainers</h4>
+          <div id="moversGainers"></div>
+        </div>
+        <div class="mv-col glass">
+          <h4 class="mv-h down">Losers</h4>
+          <div id="moversLosers"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="notizie">
+    <div class="wrap">
+      <div class="head reveal">
+        <div class="eyebrow">Notizie</div>
+        <h2>Titoli del giorno</h2>
+      </div>
+      <div class="headlines" id="headlines"></div>
+    </div>
+  </section>
+
+  <section class="block" id="brief">
+    <div class="wrap">
+      <div class="head reveal">
+        <div class="eyebrow">Morning Brief</div>
+        <h2>La lettura di oggi</h2>
+      </div>
+      <div class="brief glass reveal">
+        <div class="when" id="briefWhen"></div>
+        <div class="brief-body" id="briefBody"></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<section class="error-state" id="errorState" hidden>
+  <div class="wrap">
+    <div class="error-card glass">
+      <h2 id="errorTitle">Errore</h2>
+      <p id="errorDetail" class="muted"></p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot">
+    <div class="foot-brand">
+      <div class="brand">ForwardGuidex</div>
+      <div class="disc">EOD Market Dashboard · dati end-of-day, pubblicati staticamente. Fatti e contesto; le
+        decisioni e i rischi sono tuoi. Non è consulenza finanziaria.</div>
+    </div>
+    <div class="attrib">
+      <div class="attr-block" id="attrTreasury"></div>
+      <div class="attr-block" id="attrNyfed"></div>
+    </div>
+  </div>
+</footer>
+
+<div class="overlay" id="overlay" aria-hidden="true">
+  <div class="sheet-wrap" id="sheetWrap">
+    <div class="sheet" role="dialog" aria-modal="true" id="sheet">
+      <button class="close" id="close" aria-label="Chiudi">×</button>
+      <div id="sheetBody"></div>
+    </div>
+  </div>
+</div>
+
+<script src="js/vendor/marked-12.0.2.min.js"></script>
+<script src="js/vendor/purify-3.1.6.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+/data/                 # local warehouse + briefs (root only; app/data demo files ARE tracked)
+*.duckdb
+*.duckdb.wal
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+# CI snapshot build output (candidate bundles)
+/out/
+/_candidate/

@@ -1,0 +1,216 @@
+"""ForwardGuidex command-line interface (entry point: `fwdx`)."""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from datetime import datetime, timezone
+
+from . import db
+from .config import get_settings
+from .serve import telegram
+from .transform import marts
+
+# Legacy FRED identifiers to purge in `decommission-fred`.
+_FRED_SERIES = [
+    "DGS2", "DGS10", "DGS30", "T10Y2Y", "FEDFUNDS", "DFF",
+    "IRLTLT01DEM156N", "IRLTLT01JPM156N", "IRLTLT01ITM156N", "IRLTLT01CAM156N",
+]
+
+
+def cmd_init(_args) -> None:
+    con = db.connect()
+    db.build_dim_ticker(con)
+    print(f"Initialized DB at {get_settings().db_path}")
+
+
+def _ingest(which: str) -> None:
+    # Lazy imports: markets pulls in yfinance (heavy) — only load what's needed so
+    # `export`/`validate` work without the ingest deps installed.
+    con = db.connect()
+    if which in ("markets", "all"):
+        from .ingest import markets
+        print(f"[markets] rows: {markets.ingest_markets(con)}")
+    if which in ("rates", "all"):
+        from .ingest import rates as rates_ingest
+        print(f"[rates] rows: {rates_ingest.ingest_rates(con)}")
+    if which in ("news", "all"):
+        from .ingest import news as news_ingest
+        print(f"[news] rows: {news_ingest.ingest_news(con)}")
+
+
+def cmd_ingest(args) -> None:
+    _ingest(args.source)
+
+
+def cmd_marts(_args) -> None:
+    marts.build_marts(db.connect())
+    print("Marts rebuilt.")
+
+
+def cmd_brief(_args) -> None:
+    from .intelligence.brief import build_brief
+    print(build_brief(db.connect()))
+
+
+def _send_brief(text: str) -> bool:
+    # Prefer send_brief (appends Treasury + NY Fed notices) when available.
+    sender = getattr(telegram, "send_brief", telegram.send_message)
+    return sender(text)
+
+
+def cmd_send_brief(_args) -> None:
+    from .intelligence.brief import build_brief
+    _send_brief(build_brief(db.connect()))
+    print("Brief sent.")
+
+
+def cmd_run_daily(_args) -> None:
+    from .intelligence.brief import build_brief
+    con = db.connect()
+    _ingest("all")
+    marts.build_marts(con)
+    _send_brief(build_brief(con))
+    print("Daily run complete.")
+
+
+def cmd_export(args) -> None:
+    from .serve import snapshot as snap
+
+    if args.demo:
+        payload = snap.demo_snapshot()
+        manifest = snap.write_bundle(payload, args.out_dir, demo=True)
+    else:
+        con = db.connect(read_only=True)
+        payload = snap.build_snapshot(con, market_state=args.market_state)
+        manifest = snap.write_bundle(payload, args.out_dir, demo=False)
+    print(f"Exported {manifest['snapshot']} + "
+          f"{'latest.demo.json' if args.demo else 'latest.json'} to {args.out_dir}")
+    print(f"  artifact_sha256: {manifest['artifact_sha256']}")
+    print(f"  content_hash:    {manifest['content_hash']}")
+
+
+def cmd_validate(args) -> None:
+    from .serve import validate as V
+
+    errors = V.validate_snapshot_file(args.path, mode=args.mode, manifest_path=args.manifest)
+    if errors:
+        print(f"INVALID ({len(errors)} error(s)):", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        raise SystemExit(1)
+    print(f"VALID: {args.path}")
+
+
+def cmd_publish(args) -> None:
+    from pathlib import Path
+
+    from .serve import publish
+
+    manifest = args.manifest
+    if manifest is None:
+        sibling = Path(args.path).parent / "latest.json"
+        manifest = str(sibling) if sibling.exists() else None
+    provenance = {
+        "deployment_id": os.getenv("FGX_DEPLOYMENT_ID") or os.getenv("GITHUB_RUN_ID", "local"),
+        "workflow_run_id": os.getenv("GITHUB_RUN_ID", "local"),
+        "git_commit": os.getenv("GITHUB_SHA", "local"),
+        "release_status": args.release_status,
+        "deployed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = publish.archive(args.path, manifest_path=manifest, provenance=provenance)
+    print(f"Archived: {result}")
+
+
+def cmd_decommission_fred(args) -> None:
+    """One-time FRED decommission (idempotent). Logs what it removed."""
+    con = db.connect()
+    removed = 0
+    if db.table_exists(con, "raw_macro"):
+        placeholders = ",".join("?" for _ in _FRED_SERIES)
+        before = con.execute("SELECT COUNT(*) FROM raw_macro").fetchone()[0]
+        con.execute(
+            f"DELETE FROM raw_macro WHERE source LIKE 'FRED%' OR series_id IN ({placeholders})",
+            _FRED_SERIES,
+        )
+        after = con.execute("SELECT COUNT(*) FROM raw_macro").fetchone()[0]
+        removed = before - after
+    print(f"[fred] raw_macro rows removed: {removed}")
+
+    # brief_history rows may reference FRED-derived context; purge on request.
+    if db.table_exists(con, "brief_history"):
+        n = con.execute("SELECT COUNT(*) FROM brief_history").fetchone()[0]
+        if args.purge_briefs:
+            con.execute("DELETE FROM brief_history")
+            print(f"[fred] brief_history rows purged: {n}")
+        elif n:
+            print(f"[fred] brief_history has {n} row(s) predating the source change; "
+                  f"re-run with --purge-briefs to remove them")
+
+    # Firestore archives containing FRED (best-effort; needs firebase-admin + WIF).
+    try:
+        from .serve import publish
+
+        q = getattr(publish, "quarantine_fred_archives", None)
+        if q is not None:
+            print(f"[fred] firestore archives quarantined: {q()}")
+        else:
+            print("[fred] firestore quarantine helper not available; skipping")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[fred] firestore quarantine skipped: {exc}")
+
+    # Residual-source assertion: nothing with source LIKE 'FRED%' may remain.
+    residual = 0
+    if db.table_exists(con, "raw_macro"):
+        residual = con.execute(
+            "SELECT COUNT(*) FROM raw_macro WHERE source LIKE 'FRED%'"
+        ).fetchone()[0]
+    print("[fred] reminder: remove FRED_API_KEY from env/secrets (already dropped from .env.example)")
+    if residual:
+        print(f"[fred] ERROR: {residual} residual FRED record(s) remain", file=sys.stderr)
+        raise SystemExit(1)
+    print("[fred] decommission complete (no residual FRED records).")
+
+
+def main(argv=None) -> None:
+    p = argparse.ArgumentParser(prog="fwdx", description="ForwardGuidex CLI")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("init", help="create DB + ticker dimension").set_defaults(func=cmd_init)
+    pi = sub.add_parser("ingest", help="pull source data")
+    pi.add_argument("source", nargs="?", default="all",
+                    choices=["markets", "rates", "news", "all"])
+    pi.set_defaults(func=cmd_ingest)
+    sub.add_parser("marts", help="rebuild gold marts").set_defaults(func=cmd_marts)
+    sub.add_parser("brief", help="build + print Morning Brief").set_defaults(func=cmd_brief)
+    sub.add_parser("send-brief", help="build + send brief to Telegram").set_defaults(func=cmd_send_brief)
+    sub.add_parser("run-daily", help="ingest all -> marts -> brief -> telegram").set_defaults(func=cmd_run_daily)
+
+    pe = sub.add_parser("export", help="build snapshot + manifest into a dir")
+    pe.add_argument("--out-dir", required=True)
+    pe.add_argument("--demo", action="store_true", help="write the is_demo:true demo bundle")
+    pe.add_argument("--market-state", default="PRE_OPEN")
+    pe.set_defaults(func=cmd_export)
+
+    pv = sub.add_parser("validate", help="fail-closed validate a snapshot file")
+    pv.add_argument("path")
+    pv.add_argument("--mode", default=None, help="deployment mode override")
+    pv.add_argument("--manifest", default=None, help="path to latest.json (else sibling)")
+    pv.set_defaults(func=cmd_validate)
+
+    pp = sub.add_parser("publish", help="archive snapshot to Firestore (create-only)")
+    pp.add_argument("path")
+    pp.add_argument("--manifest", default=None)
+    pp.add_argument("--release-status", default="SMOKE_TESTED")
+    pp.set_defaults(func=cmd_publish)
+
+    pd = sub.add_parser("decommission-fred", help="one-time FRED cleanup (idempotent)")
+    pd.add_argument("--purge-briefs", action="store_true")
+    pd.set_defaults(func=cmd_decommission_fred)
+
+    args = p.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

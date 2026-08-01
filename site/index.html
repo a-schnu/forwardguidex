@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ForwardGuidex</title>
+<link rel="stylesheet" href="css/landing.css" />
+</head>
+<body>
+
+<div class="blobs" aria-hidden="true"><div class="blob b1"></div><div class="blob b2"></div></div>
+
+<header>
+  <div class="wrap"><div class="nav glass">
+    <div class="brand">ForwardGuidex</div>
+    <nav class="nav-links">
+      <a href="#universo">Universo</a><a href="#settori">Settori</a>
+      <a href="#orizzonti">Orizzonti</a><a href="#brief">Brief</a>
+    </nav>
+    <span class="spacer"></span>
+    <a class="btn btn-solid" href="https://app.forwardguidex.com">Apri la dashboard</a>
+  </div></div>
+</header>
+
+<section class="hero">
+  <div class="wrap hero-inner">
+    <div class="eyebrow reveal">Sala di controllo dei mercati</div>
+    <h1 class="reveal">I tuoi mercati.<br><span class="hl">Un colpo d'occhio.</span></h1>
+    <p class="sub reveal">Indici, tassi, settori, notizie. Tutto in un posto. Per il trader e per chi investe.</p>
+    <div class="cta-row reveal">
+      <button class="btn btn-solid">Provalo</button>
+      <button class="btn">Vedi un brief</button>
+    </div>
+    <div class="scroll-hint reveal">Scorri<span class="chev"></span></div>
+  </div>
+</section>
+
+<section class="block" id="universo">
+  <div class="wrap">
+    <div class="head reveal">
+      <div class="eyebrow">Copertura</div>
+      <h2>Il quadro completo.</h2>
+      <p>Azioni, ETF, futures, tassi. Una vista sola.</p>
+    </div>
+    <div class="tiles">
+      <div class="tile glass reveal"><div class="n">4</div><div class="l">Indici</div></div>
+      <div class="tile glass reveal"><div class="n v">6</div><div class="l">Settori</div></div>
+      <div class="tile glass reveal"><div class="n">10</div><div class="l">Tassi e bond</div></div>
+      <div class="tile glass reveal"><div class="n v">3</div><div class="l">Fonti live</div></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="settori">
+  <div class="wrap">
+    <div class="head reveal">
+      <div class="eyebrow">Settori</div>
+      <h2>Sei settori. Aprili.</h2>
+      <p>Trascina. Tocca per aprire.</p>
+    </div>
+  </div>
+  <div class="wrap">
+    <div class="track" id="track">
+      <div class="scard glass" data-key="energia"><div><div class="tag">Oil &amp; Gas</div><h3>Energia</h3>
+        <div class="desc">Greggio, OPEC, Medio Oriente.</div></div>
+        <div class="foot"><div><div class="pct up">+1.8%</div><div class="etfs">XLE · XOP · OIH</div></div><span class="more">Apri ↗</span></div></div>
+      <div class="scard glass" data-key="difesa"><div><div class="tag">Defense &amp; Aerospace</div><h3>Difesa</h3>
+        <div class="desc">Guerre, budget, escalation.</div></div>
+        <div class="foot"><div><div class="pct up">+2.4%</div><div class="etfs">ITA · XAR · PPA</div></div><span class="more">Apri ↗</span></div></div>
+      <div class="scard glass" data-key="staples"><div><div class="tag">Consumer Staples</div><h3>Beni di base</h3>
+        <div class="desc">Il rifugio nei ribassi.</div></div>
+        <div class="foot"><div><div class="pct down">-0.3%</div><div class="etfs">XLP · VDC</div></div><span class="more">Apri ↗</span></div></div>
+      <div class="scard glass" data-key="software"><div><div class="tag">Tech Software</div><h3>Software</h3>
+        <div class="desc">Tassi e trimestrali.</div></div>
+        <div class="foot"><div><div class="pct up">+0.9%</div><div class="etfs">IGV · WCLD</div></div><span class="more">Apri ↗</span></div></div>
+      <div class="scard glass" data-key="chip"><div><div class="tag">Semis &amp; Hardware</div><h3>Chip</h3>
+        <div class="desc">Ciclo tech e Cina.</div></div>
+        <div class="foot"><div><div class="pct down">-1.1%</div><div class="etfs">SMH · SOXX</div></div><span class="more">Apri ↗</span></div></div>
+      <div class="scard glass" data-key="industria"><div><div class="tag">Infrastructure &amp; Industrials</div><h3>Industria</h3>
+        <div class="desc">PMI, spesa pubblica, energia.</div></div>
+        <div class="foot"><div><div class="pct up">+0.5%</div><div class="etfs">XLI · PAVE · IFRA</div></div><span class="more">Apri ↗</span></div></div>
+    </div>
+    <div class="dots" id="dots"></div>
+  </div>
+</section>
+
+<section class="block" id="orizzonti">
+  <div class="wrap">
+    <div class="head reveal">
+      <div class="eyebrow">Due orizzonti</div>
+      <h2>Due modi di usarlo.</h2>
+      <p>Stessi dati. Per il trade o per gli anni.</p>
+    </div>
+    <div class="segwrap reveal">
+      <div class="segment" id="segment">
+        <div class="thumb" id="thumb"></div>
+        <button class="seg active" data-pane="trade">Trading a leva</button>
+        <button class="seg" data-pane="long">Lungo periodo</button>
+      </div>
+    </div>
+    <div class="panes">
+      <div class="pane active" id="pane-trade">
+        <div class="feat glass"><h4><span>Cosa si muove</span></h4><p>Mover, gap e livelli, in tempo reale.</p></div>
+        <div class="feat glass"><h4><span>Impara dal passato</span></h4><p>Sui dazi, quanto scendono i chip? Coi numeri.</p></div>
+        <div class="feat glass"><h4><span>Quanto rischiare</span></h4><p>Capitale e stop → size. Long o short.</p></div>
+      </div>
+      <div class="pane" id="pane-long">
+        <div class="feat glass"><h4><span>Il trend</span></h4><p>Rendimenti, salute settori, rotazioni.</p></div>
+        <div class="feat glass"><h4><span>Il contesto</span></h4><p>Tassi, Fed, BCE. La bussola.</p></div>
+        <div class="feat glass"><h4><span>Da tenere</span></h4><p>ETF e titoli da accumulare.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <div class="wrap brief-row">
+    <div class="head reveal head-brief">
+      <div class="eyebrow">Morning Brief</div>
+      <h2>La sveglia dei mercati.</h2>
+      <p>Ogni mattina su Telegram. Due minuti.</p>
+      <div class="cta-row cta-row-start">
+        <button class="btn btn-solid">Attivalo su Telegram</button>
+      </div>
+    </div>
+    <div class="brief glass reveal">
+      <div class="when">ForwardGuidex · 1 ago 2026</div>
+      <h3>Morning Brief</h3>
+      <ul>
+        <li><b>In breve</b> — Greggio <span class="k">+1.8%</span> (Iran). Difesa su, chip giù.</li>
+        <li><b>Quadro</b> — Risk-off: Treasury su, yield giù.</li>
+        <li><b>Trading</b> — XLE e ITA forti. SMH sotto supporto.</li>
+        <li><b>Investi</b> — Trend intatto. Staples e industria stabili.</li>
+        <li><b>Oggi</b> — CPI 14:30. Verbali BCE.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<footer><div class="wrap foot">
+  <div class="brand">ForwardGuidex</div>
+  <div class="disc">Fatti e contesto. Le decisioni — e i rischi, leva compresa — sono tuoi. Non è consulenza.</div>
+</div></footer>
+
+<div class="overlay" id="overlay" aria-hidden="true">
+  <div class="sheet-wrap" id="sheetWrap">
+    <div class="sheet" role="dialog" aria-modal="true" id="sheet">
+      <button class="close" id="close" aria-label="Chiudi">×</button>
+      <div id="sheetBody"></div>
+    </div>
+  </div>
+</div>
+
+<script src="js/landing.js"></script>
+</body>
+</html>

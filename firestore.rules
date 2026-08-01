@@ -1,0 +1,27 @@
+// ForwardGuidex — Firestore security rules.
+//
+// Firestore here is a server-only, create-only history archive
+// (`snapshots_history/{date}_{artifact_sha256}`). There is NO browser Firebase
+// SDK and NO public Firestore access anywhere in this project (see the
+// architecture doc: "static-first... no Firebase SDK / public DB rules in the
+// browser"). All reads/writes happen server-side in GitHub Actions via the
+// Admin SDK (`firebase-admin`), authenticated through Workload Identity
+// Federation (WIF) — never via a client SDK, never with a service-account key
+// file, and never from this database's own client-auth rules.
+//
+// Distinct WIF service accounts enforce least privilege at the IAM layer
+// (writer SA: Firestore create-only via `serve/publish.py`; reader SA:
+// read-only, used by the CI last-known-good retrieval step). These Firestore
+// rules are the second, redundant layer: deny every client request outright,
+// regardless of caller, because no legitimate caller is ever a browser/client
+// SDK. If that ever changes (e.g. a future browser-live path), these rules
+// must be redesigned with narrow, audited scopes — not relaxed to `if true`.
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

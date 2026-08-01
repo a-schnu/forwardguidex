@@ -1,0 +1,5 @@
+Source: U.S. Department of the Treasury
+
+Treasury par yield curve rates are published by the U.S. Department of the
+Treasury and are in the public domain. ForwardGuidex reproduces them for
+informational purposes; the Treasury does not endorse ForwardGuidex.

@@ -1,0 +1,79 @@
+"""Assemble warehouse data into an LLM-written Morning Brief."""
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+
+import pandas as pd
+
+from ..config import BRIEF_DIR
+from ..transform import marts
+from .llm import chat
+
+SYSTEM = (
+    "You are ForwardGuidex, a market-intelligence analyst. Write a concise, "
+    "structured pre-open Morning Brief for a retail investor with a DUAL horizon: "
+    "(a) active leveraged long/short trading AND (b) long-term buy-and-hold "
+    "investing, both in stocks and ETFs. Address both horizons where relevant. "
+    "Be factual and data-driven. Never give personalized buy/sell advice or price "
+    "targets - surface facts, moves and context, and flag what to watch. Use short "
+    "Markdown sections."
+)
+
+
+def _fmt_movers(df: pd.DataFrame, n: int = 6) -> str:
+    df = df.dropna(subset=["ret_1d"])
+    if df.empty:
+        return ""
+    up, down = df.nlargest(n, "ret_1d"), df.nsmallest(n, "ret_1d")
+
+    def line(r) -> str:
+        tag = r["sector_label"] or r["role"]
+        return f"- {r['ticker']} ({tag}): {r['ret_1d']:+.2f}% -> {r['last_close']:.2f}"
+
+    return ("Top gainers:\n" + "\n".join(line(r) for _, r in up.iterrows())
+            + "\n\nTop losers:\n" + "\n".join(line(r) for _, r in down.iterrows()))
+
+
+def build_context(con) -> str:
+    lat, sec, rat, nws = (marts.latest(con), marts.sectors(con),
+                          marts.rates(con), marts.news(con, limit=18))
+    parts = ["## MARKET SNAPSHOT"]
+    if not lat.empty:
+        parts.append(_fmt_movers(lat))
+    if not sec.empty:
+        parts.append("\n## SECTORS (avg 1d %)\n" + "\n".join(
+            f"- {r.sector_label}: {r.avg_ret_1d:+.2f}%" for r in sec.itertuples()))
+    if not rat.empty:
+        parts.append("\n## RATES / YIELDS\n" + "\n".join(
+            f"- {r.name}: {r.value:.2f} (chg {r.chg:+.2f})" for r in rat.itertuples()))
+    if not nws.empty:
+        parts.append("\n## HEADLINES\n" + "\n".join(
+            f"- [{r.topic}] {r.title} ({r.domain})" for r in nws.itertuples()))
+    return "\n".join(parts)
+
+
+def build_brief(con, save: bool = True) -> str:
+    context = build_context(con)
+    user = (
+        "Write today's Morning Brief from this data. Structure: "
+        "1) TL;DR (2-3 bullets), 2) Cross-asset read, 3) Sector watch "
+        "(oil & gas, defense, staples, software, semis, industrials), "
+        "4) Rates & macro, 5) What to watch today - split into "
+        "'Short-term trade triggers' and 'Long-term investment signals'. "
+        "Keep under 500 words.\n\n"
+        f"DATA:\n{context}"
+    )
+    body = chat([{"role": "system", "content": SYSTEM},
+                 {"role": "user", "content": user}])
+    content = f"# ForwardGuidex - Morning Brief - {date.today():%Y-%m-%d}\n\n{body}"
+    if save:
+        BRIEF_DIR.mkdir(parents=True, exist_ok=True)
+        (BRIEF_DIR / f"{date.today():%Y-%m-%d}.md").write_text(content, encoding="utf-8")
+        _save_history(con, content)
+    return content
+
+
+def _save_history(con, content: str) -> None:
+    con.execute("CREATE TABLE IF NOT EXISTS brief_history (created_at TIMESTAMP, content VARCHAR)")
+    con.execute("INSERT INTO brief_history VALUES (?, ?)",
+                [datetime.now(timezone.utc).replace(tzinfo=None), content])

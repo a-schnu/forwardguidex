@@ -1,0 +1,20 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "snapshots_history",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "metadata.is_demo", "order": "ASCENDING" },
+        { "fieldPath": "metadata.release_status", "order": "ASCENDING" },
+        { "fieldPath": "metadata.deployed_at", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "snapshots_history",
+      "fieldPath": "payload_json",
+      "indexes": []
+    }
+  ]
+}

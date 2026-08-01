@@ -1,0 +1,493 @@
+name: deploy-app
+
+# Code-only deploy path: triggered when app/** changes (dashboard frontend) or
+# manually. Per the architecture doc this must NOT rebuild data — it retrieves
+# and re-validates the last-known-good published snapshot from the Firestore
+# archive (deterministic record contract, R4-5.b) and redeploys app/ with that
+# data, so a CSS/JS fix ships without waiting on/re-running the daily pipeline.
+#
+# Shares a single `production` release lock with daily.yml (see `concurrency`
+# below) so the two workflows never race a Cloudflare Pages deploy or a
+# Firestore archive write against each other.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+  workflow_dispatch: {}
+
+# Least privilege by default; `id-token: write` is granted ONLY on the
+# resolve-last-known-good job below (the one GCP/WIF-auth job in this
+# workflow), never on any other job.
+permissions:
+  contents: read
+
+# Shared across BOTH workflows (this file and daily.yml). GitHub Actions
+# concurrency groups are workflow-agnostic — a group name is global to the
+# repo — so naming them identically here and in daily.yml means only one
+# release (whichever pipeline it came from) is ever in flight, and the lock
+# is held for the whole job (select -> validate -> deploy -> smoke ->
+# rollback/success), not released early at the `wrangler deploy` step.
+concurrency:
+  group: forwardguidex-production-deployment
+  cancel-in-progress: false
+
+env:
+  CF_PROJECT_NAME: fgx-dashboard
+  # Set repo variable APP_HOST to your live dashboard URL (e.g. the exact
+  # fgx-dashboard.pages.dev subdomain, or https://app.forwardguidex.com once the
+  # custom domain is added). Falls back to the default pages.dev name.
+  APP_HOST: ${{ vars.APP_HOST || 'https://fgx-dashboard.pages.dev' }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Job 1 — resolve the deterministic last-known-good snapshot.
+  #
+  # Source order per the plan is "Firestore archive -> GH artifact ->
+  # currently-deployed". This job implements the primary source (Firestore
+  # archive) directly against the Firestore REST API using a read-only WIF
+  # identity (WIF_READER_SA) — no service-account key file, no firebase-admin
+  # dependency needed here (that library is reserved for serve/publish.py's
+  # writer path). The GH-artifact and currently-deployed fallbacks are NOT
+  # implemented in this pass: if the Firestore query comes back empty or
+  # fails, this job fails closed rather than guessing ("fail (never DEMO) if
+  # none" per R4-5.b). A follow-up could add those fallbacks (e.g. a
+  # `fwdx fetch-last-known-good` CLI command) for full parity with the plan;
+  # documenting that gap here rather than silently reimplementing pipeline
+  # logic that belongs to the Python package.
+  # ---------------------------------------------------------------------
+  resolve-last-known-good:
+    name: Resolve last-known-good snapshot (Firestore archive, read-only WIF)
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write # ONLY this job needs id-token:write, for WIF -> GCP.
+    outputs:
+      artifact_sha256: ${{ steps.resolve.outputs.artifact_sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Authenticate to GCP (WIF, reader service account)
+        id: auth
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_READER_SA }}
+          token_format: access_token
+          # Firestore/Datastore's OAuth scope; the *read-only* guarantee comes
+          # from IAM (WIF_READER_SA should be bound to roles/datastore.viewer
+          # only — see the deploy runbook), not from the scope string itself.
+          access_token_scopes: https://www.googleapis.com/auth/datastore
+
+      - name: Query Firestore archive for the newest SMOKE_TESTED, non-demo snapshot
+        id: resolve
+        env:
+          FIRESTORE_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          GCP_PROJECT_ID: ${{ vars.GOOGLE_CLOUD_PROJECT }}
+        run: |
+          set -euo pipefail
+          mkdir -p resolved
+          python3 - <<-'PYEOF'
+          	# Resolve the deterministic last-known-good record (R4-5.b):
+          	#   accept only release_status == SMOKE_TESTED AND is_demo == false,
+          	#   select by descending metadata.deployed_at.
+          	# This assumes the archive document shape from R4-5.e:
+          	#   { metadata: { artifact_sha256, content_hash, deployed_at,
+          	#                 deployment_id, workflow_run_id, git_commit,
+          	#                 release_status, is_demo },
+          	#     payload_json: "<canonical string>" }
+          	# and that payload_json's raw UTF-8 bytes ARE the exact final
+          	# snapshot file bytes (so its SHA-256 equals artifact_sha256) —
+          	# per the plan, content_hash is computed over the canonical
+          	# payload and then re-inserted before the final bytes are
+          	# serialized, and payload_json is that same canonical string.
+          	# If serve/publish.py stores something different, this step and
+          	# firestore.indexes.json's composite index must be updated together.
+          	import hashlib
+          	import json
+          	import os
+          	import sys
+          	import urllib.error
+          	import urllib.request
+
+          	project = os.environ["GCP_PROJECT_ID"]
+          	token = os.environ["FIRESTORE_ACCESS_TOKEN"]
+          	if not project:
+          	    sys.exit("::error::GOOGLE_CLOUD_PROJECT is not set (repo/environment variable). Cannot resolve last-known-good.")
+
+          	url = f"https://firestore.googleapis.com/v1/projects/{project}/databases/(default)/documents:runQuery"
+          	query = {
+          	    "structuredQuery": {
+          	        "from": [{"collectionId": "snapshots_history"}],
+          	        "where": {
+          	            "compositeFilter": {
+          	                "op": "AND",
+          	                "filters": [
+          	                    {"fieldFilter": {"field": {"fieldPath": "metadata.is_demo"}, "op": "EQUAL", "value": {"booleanValue": False}}},
+          	                    {"fieldFilter": {"field": {"fieldPath": "metadata.release_status"}, "op": "EQUAL", "value": {"stringValue": "SMOKE_TESTED"}}},
+          	                ],
+          	            }
+          	        },
+          	        "orderBy": [{"field": {"fieldPath": "metadata.deployed_at"}, "direction": "DESCENDING"}],
+          	        "limit": 1,
+          	    }
+          	}
+          	req = urllib.request.Request(
+          	    url,
+          	    data=json.dumps(query).encode("utf-8"),
+          	    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+          	    method="POST",
+          	)
+          	try:
+          	    with urllib.request.urlopen(req, timeout=30) as resp:
+          	        rows = json.load(resp)
+          	except urllib.error.HTTPError as e:
+          	    sys.exit(f"::error::Firestore runQuery failed: HTTP {e.code} {e.read().decode('utf-8', 'replace')[:500]}")
+          	except urllib.error.URLError as e:
+          	    sys.exit(f"::error::Firestore runQuery failed: {e}")
+
+          	rows = [r for r in rows if isinstance(r, dict) and "document" in r]
+          	if not rows:
+          	    sys.exit("::error::No SMOKE_TESTED, non-demo snapshot found in the Firestore archive. Refusing to deploy — never falling back to DEMO data (R4-5.b).")
+
+          	fields = rows[0]["document"]["fields"]
+          	metadata = fields["metadata"]["mapValue"]["fields"]
+
+          	def dv_str(v):
+          	    return v.get("stringValue") or v.get("timestampValue")
+
+          	artifact_sha256 = metadata["artifact_sha256"]["stringValue"]
+          	content_hash = metadata["content_hash"]["stringValue"]
+          	is_demo = metadata["is_demo"]["booleanValue"]
+          	release_status = metadata["release_status"]["stringValue"]
+          	deployed_at = dv_str(metadata["deployed_at"])
+          	payload_json = fields["payload_json"]["stringValue"]
+
+          	# Belt-and-suspenders: re-check in code even though the query already filtered.
+          	if is_demo:
+          	    sys.exit("::error::Resolved archive record has metadata.is_demo == true; refusing.")
+          	if release_status != "SMOKE_TESTED":
+          	    sys.exit(f"::error::Resolved archive record has release_status={release_status!r}, not SMOKE_TESTED; refusing.")
+
+          	payload_bytes = payload_json.encode("utf-8")
+          	computed_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+          	if computed_sha256 != artifact_sha256:
+          	    sys.exit(
+          	        f"::error::Archive integrity check failed: SHA-256(payload_json)={computed_sha256} "
+          	        f"!= recorded metadata.artifact_sha256={artifact_sha256}."
+          	    )
+
+          	snapshot_name = f"snapshot.{artifact_sha256}.json"
+          	with open(f"resolved/{snapshot_name}", "wb") as f:
+          	    f.write(payload_bytes)
+
+          	manifest = {
+          	    "snapshot": snapshot_name,
+          	    "artifact_sha256": artifact_sha256,
+          	    "content_hash": content_hash,
+          	    "generated_at": deployed_at,
+          	    "schema_version": 1,
+          	}
+          	with open("resolved/latest.json", "w", encoding="utf-8") as f:
+          	    json.dump(manifest, f, indent=2)
+          	    f.write("\n")
+
+          	print(f"Resolved last-known-good snapshot {snapshot_name} (deployed_at={deployed_at}, is_demo={is_demo}).")
+
+          	gh_output = os.environ.get("GITHUB_OUTPUT")
+          	if gh_output:
+          	    with open(gh_output, "a", encoding="utf-8") as f:
+          	        f.write(f"artifact_sha256={artifact_sha256}\n")
+          	PYEOF
+
+      - name: Upload resolved snapshot for the deploy job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: last-known-good-snapshot
+          path: resolved/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Job 2 — re-validate, Direct Upload, authenticated smoke test, rollback.
+  # ---------------------------------------------------------------------
+  deploy:
+    name: Re-validate + deploy app/ (Cloudflare Pages Direct Upload) + smoke test
+    needs: resolve-last-known-good
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install forwardguidex (core, for `fwdx validate`)
+        run: pip install -e .
+
+      - name: Download resolved last-known-good snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: last-known-good-snapshot
+          path: resolved/
+
+      - name: Re-validate the resolved snapshot (fail-closed)
+        run: |
+          set -euo pipefail
+          SNAP=$(ls resolved/snapshot.*.json | head -n1)
+          echo "Re-validating $SNAP"
+          fwdx validate "$SNAP"
+
+      - name: Assert is_demo == false (explicit deploy-time gate, belt-and-suspenders)
+        run: |
+          set -euo pipefail
+          python3 - <<-'PYEOF'
+          	import glob
+          	import json
+          	import sys
+
+          	snap_path = glob.glob("resolved/snapshot.*.json")[0]
+          	with open(snap_path, encoding="utf-8") as f:
+          	    snap = json.load(f)
+          	meta = snap.get("meta", {})
+          	if meta.get("is_demo") is not False:
+          	    sys.exit(f"::error::{snap_path} has meta.is_demo={meta.get('is_demo')!r}; refusing to deploy demo data to production.")
+          	if meta.get("schema_version") != 1:
+          	    sys.exit(f"::error::{snap_path} has unsupported meta.schema_version={meta.get('schema_version')!r}.")
+          	print(f"OK: {snap_path} is_demo=false, schema_version=1.")
+          	PYEOF
+
+      - name: Stage resolved snapshot into app/data/ (prod files alongside demo files)
+        run: |
+          set -euo pipefail
+          cp resolved/snapshot.*.json resolved/latest.json app/data/
+          ls -la app/data/
+
+      - name: Capture current live deployment (pre-deploy, for rollback target)
+        id: pre
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          python3 - <<-'PYEOF'
+          	import json
+          	import os
+          	import urllib.request
+
+          	token = os.environ["CLOUDFLARE_API_TOKEN"]
+          	account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
+          	project = os.environ.get("CF_PROJECT_NAME", "fgx-dashboard")
+
+          	url = f"https://api.cloudflare.com/client/v4/accounts/{account}/pages/projects/{project}/deployments?env=production"
+          	req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+          	with urllib.request.urlopen(req, timeout=30) as resp:
+          	    body = json.load(resp)
+
+          	deployments = [d for d in body.get("result", []) if d.get("latest_stage", {}).get("status") == "success"]
+          	prev_id = deployments[0]["id"] if deployments else ""
+
+          	gh_output = os.environ.get("GITHUB_OUTPUT")
+          	with open(gh_output, "a", encoding="utf-8") as f:
+          	    f.write(f"deployment_id={prev_id}\n")
+          	print(f"Previous successful production deployment: {prev_id or '(none found — first deploy)'}")
+          	PYEOF
+        # CF_PROJECT_NAME is inherited from the workflow-level `env:` block above.
+
+      - name: Deploy app/ to Cloudflare Pages (Direct Upload)
+        id: deploy_cf
+        uses: cloudflare/wrangler-action@da0e0dfe58b7a431659754fdf3f186c529afbe65 # v3.14.1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy app --project-name=fgx-dashboard --branch=main
+
+      # Authenticated smoke test (Access-protected app). Implemented inline in
+      # Python (readable, no extra deps beyond the stdlib) per the plan's
+      # "python or bash+curl+sha256sum, keep it readable and commented".
+      # Asserts, in order: Access-OK (200) · latest.json valid JSON ·
+      # referenced snapshot exists · schema_version==1 · raw-bytes SHA-256 ==
+      # artifact_sha256 · is_demo==false · freshness/quality present ·
+      # security headers present (CSP + X-Content-Type-Options).
+      - name: Authenticated smoke test
+        id: smoke
+        continue-on-error: true
+        env:
+          APP_HOST: ${{ env.APP_HOST }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          python3 - <<-'PYEOF' | tee smoke-test.log
+          	import hashlib
+          	import json
+          	import os
+          	import sys
+          	import time
+          	import urllib.error
+          	import urllib.request
+
+          	host = os.environ["APP_HOST"]
+          	headers = {
+          	    "CF-Access-Client-Id": os.environ["CF_ACCESS_CLIENT_ID"],
+          	    "CF-Access-Client-Secret": os.environ["CF_ACCESS_CLIENT_SECRET"],
+          	}
+          	cache_bust = f"?_smoke={int(time.time())}"
+
+          	def fetch(path, as_json=False):
+          	    req = urllib.request.Request(host + path + cache_bust, headers=headers)
+          	    try:
+          	        with urllib.request.urlopen(req, timeout=30) as resp:
+          	            body = resp.read()
+          	            return resp.status, dict(resp.headers), body
+          	    except urllib.error.HTTPError as e:
+          	        return e.code, dict(e.headers or {}), e.read()
+
+          	# 1) Access-OK + security headers on the app shell.
+          	status, resp_headers, _ = fetch("/")
+          	if status != 200:
+          	    sys.exit(f"::error::GET / -> HTTP {status} (expected 200; Cloudflare Access may be rejecting the service token).")
+          	lower_headers = {k.lower(): v for k, v in resp_headers.items()}
+          	for required in ("content-security-policy", "x-content-type-options"):
+          	    if required not in lower_headers:
+          	        sys.exit(f"::error::Missing required security header on /: {required}")
+          	print("OK: Access-authenticated GET / -> 200, CSP + X-Content-Type-Options present.")
+
+          	# 2) latest.json valid JSON with the expected manifest shape.
+          	status, _, body = fetch("/data/latest.json")
+          	if status != 200:
+          	    sys.exit(f"::error::GET /data/latest.json -> HTTP {status}")
+          	try:
+          	    manifest = json.loads(body)
+          	except json.JSONDecodeError as e:
+          	    sys.exit(f"::error::/data/latest.json is not valid JSON: {e}")
+          	for key in ("snapshot", "artifact_sha256", "content_hash", "generated_at", "schema_version"):
+          	    if key not in manifest:
+          	        sys.exit(f"::error::/data/latest.json missing required key: {key}")
+          	if manifest["schema_version"] != 1:
+          	    sys.exit(f"::error::/data/latest.json schema_version={manifest['schema_version']!r}, expected 1.")
+          	print(f"OK: /data/latest.json valid, schema_version=1, snapshot={manifest['snapshot']}.")
+
+          	# 3) Referenced snapshot exists; raw-bytes SHA-256 == artifact_sha256 (primary integrity check).
+          	status, _, snap_body = fetch(f"/data/{manifest['snapshot']}")
+          	if status != 200:
+          	    sys.exit(f"::error::GET /data/{manifest['snapshot']} -> HTTP {status}")
+          	computed = hashlib.sha256(snap_body).hexdigest()
+          	if computed != manifest["artifact_sha256"]:
+          	    sys.exit(
+          	        f"::error::Raw-bytes SHA-256 mismatch for {manifest['snapshot']}: "
+          	        f"computed={computed} manifest.artifact_sha256={manifest['artifact_sha256']}"
+          	    )
+          	print(f"OK: raw-bytes SHA-256 of {manifest['snapshot']} matches artifact_sha256.")
+
+          	# 4) is_demo==false, freshness/quality present.
+          	try:
+          	    snapshot = json.loads(snap_body)
+          	except json.JSONDecodeError as e:
+          	    sys.exit(f"::error::{manifest['snapshot']} is not valid JSON: {e}")
+          	meta = snapshot.get("meta", {})
+          	if meta.get("is_demo") is not False:
+          	    sys.exit(f"::error::Live snapshot meta.is_demo={meta.get('is_demo')!r}, expected false.")
+          	if not meta.get("freshness"):
+          	    sys.exit("::error::Live snapshot meta.freshness missing.")
+          	if not meta.get("quality"):
+          	    sys.exit("::error::Live snapshot meta.quality missing.")
+          	print(f"OK: is_demo=false, freshness={meta.get('freshness')!r}, quality={meta.get('quality')!r}.")
+
+          	print("SMOKE TEST PASSED.")
+          	PYEOF
+
+      - name: Upload smoke test log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-test-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: smoke-test.log
+          retention-days: 30
+          if-no-files-found: warn
+
+      # --- Rollback path (smoke failed) ---------------------------------
+      # The concurrency lock (workflow-level, see top of file) stays held
+      # through all of this: we do not release it early, and we do not set
+      # cancel-in-progress, so no other production deploy/publish can start
+      # until this job (rollback included) finishes.
+      - name: Rollback to previous successful deployment (smoke failed)
+        if: always() && steps.smoke.outcome == 'failure'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PREV_DEPLOYMENT_ID: ${{ steps.pre.outputs.deployment_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PREV_DEPLOYMENT_ID:-}" ]; then
+            echo "::error::Smoke test failed and no previous successful deployment was found to roll back to. Manual intervention required."
+            exit 1
+          fi
+          echo "Rolling back Cloudflare Pages project fgx-dashboard to deployment $PREV_DEPLOYMENT_ID"
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/fgx-dashboard/deployments/${PREV_DEPLOYMENT_ID}/rollback" \
+            -o rollback-response.json
+          cat rollback-response.json
+          python3 -c "import json,sys; body=json.load(open('rollback-response.json')); sys.exit(0 if body.get('success') else 1)"
+
+      - name: Verify rollback (re-run Access + hash checks only)
+        if: always() && steps.smoke.outcome == 'failure'
+        env:
+          APP_HOST: ${{ env.APP_HOST }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          python3 - <<-'PYEOF'
+          	import hashlib
+          	import json
+          	import os
+          	import sys
+          	import time
+          	import urllib.error
+          	import urllib.request
+
+          	host = os.environ["APP_HOST"]
+          	headers = {
+          	    "CF-Access-Client-Id": os.environ["CF_ACCESS_CLIENT_ID"],
+          	    "CF-Access-Client-Secret": os.environ["CF_ACCESS_CLIENT_SECRET"],
+          	}
+          	cache_bust = f"?_smoke_rollback={int(time.time())}"
+
+          	def fetch(path):
+          	    req = urllib.request.Request(host + path + cache_bust, headers=headers)
+          	    try:
+          	        with urllib.request.urlopen(req, timeout=30) as resp:
+          	            return resp.status, resp.read()
+          	    except urllib.error.HTTPError as e:
+          	        return e.code, e.read()
+
+          	status, _ = fetch("/")
+          	if status != 200:
+          	    sys.exit(f"::error::Post-rollback GET / -> HTTP {status}. Rollback did not restore service.")
+
+          	status, body = fetch("/data/latest.json")
+          	if status != 200:
+          	    sys.exit(f"::error::Post-rollback GET /data/latest.json -> HTTP {status}.")
+          	manifest = json.loads(body)
+
+          	status, snap_body = fetch(f"/data/{manifest['snapshot']}")
+          	if status != 200 or hashlib.sha256(snap_body).hexdigest() != manifest["artifact_sha256"]:
+          	    sys.exit("::error::Post-rollback snapshot hash verification failed.")
+
+          	print("OK: rollback verified — previous deployment is live and internally consistent.")
+          	PYEOF
+
+      - name: Alert — smoke test failed, rollback performed
+        if: always() && steps.smoke.outcome == 'failure'
+        run: |
+          echo "::error::Deploy smoke test FAILED for app.forwardguidex.com. Rolled back to the previous successful Cloudflare Pages deployment (id: ${{ steps.pre.outputs.deployment_id }}). See the smoke-test-log-${{ github.run_id }}-${{ github.run_attempt }} artifact for details. This job is intentionally failing so GitHub surfaces a run failure (Actions notification / status check) as the alert; wire a dedicated channel (Slack/email/PagerDuty webhook) here if stronger paging is needed."
+          exit 1

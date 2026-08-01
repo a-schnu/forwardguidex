@@ -1,0 +1,4 @@
+* text=auto eol=lf
+app/data/*.json binary
+*.woff2 binary
+*.min.js binary

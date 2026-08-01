@@ -1,0 +1,71 @@
+# ForwardGuidex — investment universe & data-source config
+# Edit freely: add tickers, Treasury maturities, NY Fed rates, or GDELT queries.
+# Rates come from primary sources (US Treasury + NY Fed) — FRED was removed for
+# compliance (its terms conflict with persistence + LLM use). See config/sources.yaml.
+
+indexes:
+  - {ticker: "^GSPC", name: "S&P 500"}
+  - {ticker: "^DJI",  name: "Dow Jones"}
+  - {ticker: "^NDX",  name: "Nasdaq 100"}
+  - {ticker: "^RUT",  name: "Russell 2000"}
+
+futures:
+  - {ticker: "CL=F",  name: "WTI Crude"}
+  - {ticker: "BZ=F",  name: "Brent Crude"}
+  - {ticker: "NG=F",  name: "Nat Gas"}
+  - {ticker: "GC=F",  name: "Gold"}
+  - {ticker: "ES=F",  name: "S&P e-mini"}
+  - {ticker: "NQ=F",  name: "Nasdaq e-mini"}
+  - {ticker: "RTY=F", name: "Russell e-mini"}
+  - {ticker: "YM=F",  name: "Dow e-mini"}
+
+sectors:
+  oil_gas:
+    label: "Oil & Gas"
+    etfs:  [XLE, XOP, OIH]
+    names: [XOM, CVX, COP, SLB]
+  defense:
+    label: "Defense & Aerospace"
+    etfs:  [ITA, XAR, PPA]
+    names: [LMT, RTX, NOC, GD]
+  staples:
+    label: "Consumer Staples"
+    etfs:  [XLP, VDC]
+    names: [PG, KO, PEP, COST]
+  software:
+    label: "Tech Software"
+    etfs:  [IGV, WCLD]
+    names: [MSFT, CRM, ORCL, NOW]
+  semis:
+    label: "Tech Hardware / Semis"
+    etfs:  [SMH, SOXX]
+    names: [NVDA, AMD, TSM, AVGO, ASML]
+  industrials:
+    label: "Infrastructure & Industrials"
+    etfs:  [XLI, PAVE, IFRA]
+    names: [CAT, DE, HON, GE, UNP]
+
+# US Treasury Daily Par Yield Curve maturities (public domain; attribution required).
+# `column` is the header used in the Treasury daily CSV feed. `series_id` is our
+# internal id persisted to raw_macro (source = "UST"). International sovereign
+# yields are deferred to a later phase (primary sources only).
+treasury_maturities:
+  - {series_id: "UST2Y",  name: "US 2Y Treasury Par Yield",  column: "2 Yr"}
+  - {series_id: "UST5Y",  name: "US 5Y Treasury Par Yield",  column: "5 Yr"}
+  - {series_id: "UST10Y", name: "US 10Y Treasury Par Yield", column: "10 Yr"}
+  - {series_id: "UST30Y", name: "US 30Y Treasury Par Yield", column: "30 Yr"}
+
+# NY Fed Markets API reference rates (attribution + verbatim disclaimer required).
+# `group` selects the API path (secured/unsecured); `rate` is the NY Fed rate code.
+nyfed_rates:
+  - {series_id: "EFFR", name: "Effective Federal Funds Rate",       group: "unsecured", rate: "effr"}
+  - {series_id: "SOFR", name: "Secured Overnight Financing Rate",   group: "secured",   rate: "sofr"}
+
+# GDELT DOC 2.0 free news/geopolitics queries
+gdelt_queries:
+  - {key: "iran",     query: "Iran (oil OR military OR sanctions OR strike)"}
+  - {key: "fed",      query: "Federal Reserve (interest rate OR inflation)"}
+  - {key: "ecb",      query: "European Central Bank rate"}
+  - {key: "oil",      query: "OPEC OR crude oil price"}
+  - {key: "semis",    query: "semiconductor (export controls OR chips OR Nvidia OR TSMC)"}
+  - {key: "defense",  query: "defense spending OR military conflict"}

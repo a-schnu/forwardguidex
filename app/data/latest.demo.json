@@ -1,0 +1,7 @@
+{
+  "snapshot": "snapshot.demo.json",
+  "artifact_sha256": "423bfe22b697b3cedb5a09063ad1dcd2736cecf9201da47ea1cd58306d4b3758",
+  "content_hash": "sha256:7498cca702795b9045ea462fdc5f0a475a43cbf6d514005c8764a93b60416b68",
+  "generated_at": "2026-08-01T08:00:00+00:00",
+  "schema_version": 1
+}

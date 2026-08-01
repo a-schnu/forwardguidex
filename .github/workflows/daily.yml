@@ -1,0 +1,383 @@
+name: forwardguidex-daily
+
+# Full daily pipeline: ingest -> marts -> brief -> Telegram (fwdx run-daily,
+# app-scoped) -> export the prod snapshot from the warehouse -> validate
+# (fail-closed) -> Cloudflare Pages Direct Upload of app/ -> authenticated
+# smoke test -> (separate GCP-auth/WIF job) archive to Firestore (create-only)
+# -> release the shared production lock.
+#
+# Shares a single `production` release lock with deploy-app.yml (see
+# `concurrency` below): the two workflows use the SAME group name, so a
+# code-only deploy and a daily data refresh can never race each other's
+# Cloudflare Pages deploy or Firestore archive write.
+
+on:
+  schedule:
+    - cron: "30 11 * * 1-5" # 11:30 UTC on weekdays (pre US open)
+  workflow_dispatch: {}
+
+# Least privilege by default; `id-token: write` is granted ONLY on the
+# `publish` job below (the one GCP/WIF-auth job in this workflow).
+permissions:
+  contents: read
+
+# Shared across BOTH workflows (this file and deploy-app.yml) — same group
+# name. Held for the whole run (build -> validate -> deploy -> smoke ->
+# rollback/success -> archive), not released early.
+concurrency:
+  group: forwardguidex-production-deployment
+  cancel-in-progress: false
+
+env:
+  CF_PROJECT_NAME: fgx-dashboard
+  # Set repo variable APP_HOST to your live dashboard URL (e.g. the exact
+  # fgx-dashboard.pages.dev subdomain, or https://app.forwardguidex.com once the
+  # custom domain is added). Falls back to the default pages.dev name.
+  APP_HOST: ${{ vars.APP_HOST || 'https://fgx-dashboard.pages.dev' }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Job 1 — run the pipeline, export + validate the snapshot, deploy,
+  # smoke test, rollback on failure.
+  # ---------------------------------------------------------------------
+  build-validate-deploy:
+    name: run-daily -> export -> validate -> deploy -> smoke
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    outputs:
+      artifact_sha256: ${{ steps.export.outputs.artifact_sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install forwardguidex (core)
+        run: pip install -e .
+
+      - name: Daily run (ingest all -> marts -> brief -> Telegram)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # FRED was decommissioned (compliance) — no FRED_API_KEY here; see
+          # `fwdx decommission-fred` and legal/us-treasury.txt +
+          # legal/nyfed-reference-rates.txt for the replacement sources.
+        run: fwdx run-daily
+
+      - name: Export the prod snapshot from the warehouse
+        id: export
+        run: |
+          set -euo pipefail
+          fwdx export --out-dir dist
+          ls -la dist/
+          SNAP=$(ls dist/snapshot.*.json | head -n1)
+          ARTIFACT_SHA256=$(python3 -c "import json,sys; print(json.load(open('dist/latest.json'))['artifact_sha256'])")
+          echo "snapshot_path=$SNAP" >> "$GITHUB_OUTPUT"
+          echo "artifact_sha256=$ARTIFACT_SHA256" >> "$GITHUB_OUTPUT"
+          echo "ARTIFACT_SHA256=$ARTIFACT_SHA256" >> "$GITHUB_ENV"
+
+      - name: Validate the candidate snapshot (fail-closed)
+        run: |
+          set -euo pipefail
+          fwdx validate "${{ steps.export.outputs.snapshot_path }}"
+
+      - name: Stage validated snapshot into app/data/ (prod files alongside demo files)
+        run: |
+          set -euo pipefail
+          cp dist/snapshot.*.json dist/latest.json app/data/
+          ls -la app/data/
+
+      - name: Capture current live deployment (pre-deploy, for rollback target)
+        id: pre
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          python3 - <<-'PYEOF'
+          	import json
+          	import os
+          	import urllib.request
+
+          	token = os.environ["CLOUDFLARE_API_TOKEN"]
+          	account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
+          	project = os.environ.get("CF_PROJECT_NAME", "fgx-dashboard")
+
+          	url = f"https://api.cloudflare.com/client/v4/accounts/{account}/pages/projects/{project}/deployments?env=production"
+          	req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+          	with urllib.request.urlopen(req, timeout=30) as resp:
+          	    body = json.load(resp)
+
+          	deployments = [d for d in body.get("result", []) if d.get("latest_stage", {}).get("status") == "success"]
+          	prev_id = deployments[0]["id"] if deployments else ""
+
+          	gh_output = os.environ.get("GITHUB_OUTPUT")
+          	with open(gh_output, "a", encoding="utf-8") as f:
+          	    f.write(f"deployment_id={prev_id}\n")
+          	print(f"Previous successful production deployment: {prev_id or '(none found — first deploy)'}")
+          	PYEOF
+        # CF_PROJECT_NAME is inherited from the workflow-level `env:` block above.
+
+      - name: Deploy app/ to Cloudflare Pages (Direct Upload)
+        id: deploy_cf
+        uses: cloudflare/wrangler-action@da0e0dfe58b7a431659754fdf3f186c529afbe65 # v3.14.1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy app --project-name=fgx-dashboard --branch=main
+
+      # Authenticated smoke test (Access-protected app), inline Python, same
+      # contract as deploy-app.yml's smoke step: Access-OK (200) ·
+      # latest.json valid JSON · referenced snapshot exists · schema_version==1
+      # · raw-bytes SHA-256 == artifact_sha256 · is_demo==false ·
+      # freshness/quality present · security headers present. Additionally
+      # asserts the LIVE artifact_sha256 equals the one we just exported, to
+      # catch a stale/cached deploy rather than silently passing against old data.
+      - name: Authenticated smoke test
+        id: smoke
+        continue-on-error: true
+        env:
+          APP_HOST: ${{ env.APP_HOST }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          EXPECTED_ARTIFACT_SHA256: ${{ steps.export.outputs.artifact_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 - <<-'PYEOF' | tee smoke-test.log
+          	import hashlib
+          	import json
+          	import os
+          	import sys
+          	import time
+          	import urllib.error
+          	import urllib.request
+
+          	host = os.environ["APP_HOST"]
+          	expected_sha = os.environ["EXPECTED_ARTIFACT_SHA256"]
+          	headers = {
+          	    "CF-Access-Client-Id": os.environ["CF_ACCESS_CLIENT_ID"],
+          	    "CF-Access-Client-Secret": os.environ["CF_ACCESS_CLIENT_SECRET"],
+          	}
+          	cache_bust = f"?_smoke={int(time.time())}"
+
+          	def fetch(path):
+          	    req = urllib.request.Request(host + path + cache_bust, headers=headers)
+          	    try:
+          	        with urllib.request.urlopen(req, timeout=30) as resp:
+          	            return resp.status, dict(resp.headers), resp.read()
+          	    except urllib.error.HTTPError as e:
+          	        return e.code, dict(e.headers or {}), e.read()
+
+          	# 1) Access-OK + security headers on the app shell.
+          	status, resp_headers, _ = fetch("/")
+          	if status != 200:
+          	    sys.exit(f"::error::GET / -> HTTP {status} (expected 200; Cloudflare Access may be rejecting the service token).")
+          	lower_headers = {k.lower(): v for k, v in resp_headers.items()}
+          	for required in ("content-security-policy", "x-content-type-options"):
+          	    if required not in lower_headers:
+          	        sys.exit(f"::error::Missing required security header on /: {required}")
+          	print("OK: Access-authenticated GET / -> 200, CSP + X-Content-Type-Options present.")
+
+          	# 2) latest.json valid JSON with the expected manifest shape.
+          	status, _, body = fetch("/data/latest.json")
+          	if status != 200:
+          	    sys.exit(f"::error::GET /data/latest.json -> HTTP {status}")
+          	try:
+          	    manifest = json.loads(body)
+          	except json.JSONDecodeError as e:
+          	    sys.exit(f"::error::/data/latest.json is not valid JSON: {e}")
+          	for key in ("snapshot", "artifact_sha256", "content_hash", "generated_at", "schema_version"):
+          	    if key not in manifest:
+          	        sys.exit(f"::error::/data/latest.json missing required key: {key}")
+          	if manifest["schema_version"] != 1:
+          	    sys.exit(f"::error::/data/latest.json schema_version={manifest['schema_version']!r}, expected 1.")
+          	if manifest["artifact_sha256"] != expected_sha:
+          	    sys.exit(
+          	        f"::error::Live artifact_sha256={manifest['artifact_sha256']} does not match the snapshot "
+          	        f"just exported ({expected_sha}). The deploy may not have propagated yet, or served a stale/cached copy."
+          	    )
+          	print(f"OK: /data/latest.json valid, schema_version=1, matches freshly exported artifact_sha256.")
+
+          	# 3) Referenced snapshot exists; raw-bytes SHA-256 == artifact_sha256 (primary integrity check).
+          	status, _, snap_body = fetch(f"/data/{manifest['snapshot']}")
+          	if status != 200:
+          	    sys.exit(f"::error::GET /data/{manifest['snapshot']} -> HTTP {status}")
+          	computed = hashlib.sha256(snap_body).hexdigest()
+          	if computed != manifest["artifact_sha256"]:
+          	    sys.exit(
+          	        f"::error::Raw-bytes SHA-256 mismatch for {manifest['snapshot']}: "
+          	        f"computed={computed} manifest.artifact_sha256={manifest['artifact_sha256']}"
+          	    )
+          	print(f"OK: raw-bytes SHA-256 of {manifest['snapshot']} matches artifact_sha256.")
+
+          	# 4) is_demo==false, freshness/quality present.
+          	try:
+          	    snapshot = json.loads(snap_body)
+          	except json.JSONDecodeError as e:
+          	    sys.exit(f"::error::{manifest['snapshot']} is not valid JSON: {e}")
+          	meta = snapshot.get("meta", {})
+          	if meta.get("is_demo") is not False:
+          	    sys.exit(f"::error::Live snapshot meta.is_demo={meta.get('is_demo')!r}, expected false.")
+          	if not meta.get("freshness"):
+          	    sys.exit("::error::Live snapshot meta.freshness missing.")
+          	if not meta.get("quality"):
+          	    sys.exit("::error::Live snapshot meta.quality missing.")
+          	print(f"OK: is_demo=false, freshness={meta.get('freshness')!r}, quality={meta.get('quality')!r}.")
+
+          	print("SMOKE TEST PASSED.")
+          	PYEOF
+
+      - name: Upload smoke test log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-test-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: smoke-test.log
+          retention-days: 30
+          if-no-files-found: warn
+
+      # --- Rollback path (smoke failed) ---------------------------------
+      # NOTE: if smoke fails and we roll back, the `publish` job below is
+      # skipped entirely (it `needs: build-validate-deploy`, which will be
+      # in a failed state) — the just-generated snapshot is never archived,
+      # matching "deploy != archive" and "archive-fail/skip is not a
+      # rollback trigger, but a failed deploy must never be archived".
+      - name: Rollback to previous successful deployment (smoke failed)
+        if: always() && steps.smoke.outcome == 'failure'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PREV_DEPLOYMENT_ID: ${{ steps.pre.outputs.deployment_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PREV_DEPLOYMENT_ID:-}" ]; then
+            echo "::error::Smoke test failed and no previous successful deployment was found to roll back to. Manual intervention required."
+            exit 1
+          fi
+          echo "Rolling back Cloudflare Pages project fgx-dashboard to deployment $PREV_DEPLOYMENT_ID"
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/fgx-dashboard/deployments/${PREV_DEPLOYMENT_ID}/rollback" \
+            -o rollback-response.json
+          cat rollback-response.json
+          python3 -c "import json,sys; body=json.load(open('rollback-response.json')); sys.exit(0 if body.get('success') else 1)"
+
+      - name: Verify rollback (re-run Access + hash checks only)
+        if: always() && steps.smoke.outcome == 'failure'
+        env:
+          APP_HOST: ${{ env.APP_HOST }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          python3 - <<-'PYEOF'
+          	import hashlib
+          	import json
+          	import os
+          	import sys
+          	import time
+          	import urllib.error
+          	import urllib.request
+
+          	host = os.environ["APP_HOST"]
+          	headers = {
+          	    "CF-Access-Client-Id": os.environ["CF_ACCESS_CLIENT_ID"],
+          	    "CF-Access-Client-Secret": os.environ["CF_ACCESS_CLIENT_SECRET"],
+          	}
+          	cache_bust = f"?_smoke_rollback={int(time.time())}"
+
+          	def fetch(path):
+          	    req = urllib.request.Request(host + path + cache_bust, headers=headers)
+          	    try:
+          	        with urllib.request.urlopen(req, timeout=30) as resp:
+          	            return resp.status, resp.read()
+          	    except urllib.error.HTTPError as e:
+          	        return e.code, e.read()
+
+          	status, _ = fetch("/")
+          	if status != 200:
+          	    sys.exit(f"::error::Post-rollback GET / -> HTTP {status}. Rollback did not restore service.")
+
+          	status, body = fetch("/data/latest.json")
+          	if status != 200:
+          	    sys.exit(f"::error::Post-rollback GET /data/latest.json -> HTTP {status}.")
+          	manifest = json.loads(body)
+
+          	status, snap_body = fetch(f"/data/{manifest['snapshot']}")
+          	if status != 200 or hashlib.sha256(snap_body).hexdigest() != manifest["artifact_sha256"]:
+          	    sys.exit("::error::Post-rollback snapshot hash verification failed.")
+
+          	print("OK: rollback verified — previous deployment is live and internally consistent.")
+          	PYEOF
+
+      - name: Alert — smoke test failed, rollback performed
+        if: always() && steps.smoke.outcome == 'failure'
+        run: |
+          echo "::error::Daily deploy smoke test FAILED for app.forwardguidex.com. Rolled back to the previous successful Cloudflare Pages deployment (id: ${{ steps.pre.outputs.deployment_id }}). The freshly built snapshot was NOT archived to Firestore (publish job is skipped when this job fails). See the smoke-test-log-${{ github.run_id }}-${{ github.run_attempt }} artifact for details. This job is intentionally failing so GitHub surfaces a run failure as the alert; wire a dedicated channel (Slack/email/PagerDuty webhook) here if stronger paging is needed."
+          exit 1
+
+      - name: Upload validated snapshot for the publish job
+        if: steps.smoke.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: validated-snapshot
+          path: |
+            dist/snapshot.*.json
+            dist/latest.json
+          retention-days: 7
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Job 2 — archive the deployed, smoke-tested snapshot to Firestore
+  # (create-only, idempotent) via a separate GCP-auth (WIF) job. Only runs
+  # if build-validate-deploy succeeded (i.e. smoke passed) — a rolled-back
+  # deploy is never archived.
+  # ---------------------------------------------------------------------
+  publish:
+    name: Archive smoke-tested snapshot to Firestore (WIF, create-only)
+    needs: build-validate-deploy
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write # ONLY this job needs id-token:write, for WIF -> GCP.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install forwardguidex (core + publish extra)
+        run: pip install -e ".[publish]"
+
+      - name: Download validated snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: validated-snapshot
+          path: dist/
+
+      - name: Authenticate to GCP (WIF, writer service account)
+        id: auth
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_WRITER_SA }}
+
+      - name: Publish (archive) to Firestore snapshots_history (create-only)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          SNAP=$(ls dist/snapshot.*.json | head -n1)
+          fwdx publish "$SNAP" --manifest dist/latest.json

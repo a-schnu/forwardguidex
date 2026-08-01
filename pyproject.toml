@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forwardguidex"
+version = "0.1.0"
+description = "ForwardGuidex - personal market-intelligence warehouse"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Antonino Mustazza" }]
+dependencies = [
+    "duckdb>=0.10",
+    "pandas>=2.0",
+    "yfinance>=0.2.40",
+    "requests>=2.31",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+    "jsonschema[format-nongpl]>=4.20",
+    "pandas-market-calendars>=4.4",
+]
+
+[project.optional-dependencies]
+# Firestore create-only archive (CI GCP-auth job only). Heavy (grpc/google-cloud);
+# publish.py imports it lazily so the rest of the package works without it.
+publish = ["firebase-admin>=6.5"]
+# Legacy Streamlit dev dashboard (superseded by the static app/ build).
+dashboard = ["streamlit>=1.33", "plotly>=5.20"]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[project.scripts]
+fwdx = "forwardguidex.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+forwardguidex = ["serve/snapshot_schema.json"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

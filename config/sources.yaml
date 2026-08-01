@@ -1,0 +1,60 @@
+# ForwardGuidex — source-rights policy (machine-enforced, evidence-backed).
+#
+# `fwdx validate` computes the set of (source, use) pairs a candidate snapshot
+# actually needs (dashboard render, ai_input to the brief, persistence, telegram)
+# and REJECTS if, for the current deployment_mode, any needed source is:
+#   - approval_status != approved
+#   - review expired (review_expires_at < today)
+#   - missing evidence_reference
+#   - deployment_mode not in allowed_modes
+#   - a needed use not in allowed_uses
+# Uses are distinct: dashboard / telegram / ai_input / persistence approvals do
+# NOT imply each other. Moving Phase 0A -> public cannot happen by DNS/config
+# alone; it requires an explicit approved review for a PUBLIC_* mode.
+
+deployment_mode: PRIVATE_PERSONAL     # LOCAL_DEMO | PRIVATE_PERSONAL | PUBLIC_NONCOMMERCIAL | PUBLIC_COMMERCIAL
+
+sources:
+  us_treasury:
+    approval_status: approved          # approved | pending | rejected
+    rights_basis: "US federal government data; internal rights review completed"
+    evidence_reference: "UST_REVIEW_2026_08"
+    source_page: "Daily Treasury Par Yield Curve Rates"
+    allowed_modes: [LOCAL_DEMO, PRIVATE_PERSONAL, PUBLIC_NONCOMMERCIAL, PUBLIC_COMMERCIAL]
+    allowed_uses: [persistence, ai_input, private_dashboard, private_telegram, public_dashboard]
+    attribution_required: true
+    attribution_file: "legal/us-treasury.txt"
+    reviewed_at: "2026-08-01"
+    review_expires_at: "2027-08-01"
+  ny_fed:
+    approval_status: approved
+    rights_basis: "NY Fed Terms of Use for reference rates; attribution + disclaimer required"
+    evidence_reference: "NYFED_TERMS_2026_08"
+    source_page: "NY Fed Markets API — reference rates (EFFR, SOFR)"
+    allowed_modes: [LOCAL_DEMO, PRIVATE_PERSONAL]
+    allowed_uses: [persistence, ai_input, private_dashboard, private_telegram]
+    attribution_required: true
+    attribution_file: "legal/us-treasury.txt"   # placeholder; NY Fed uses disclaimer_file below
+    disclaimer_required: true
+    disclaimer_version: "2026-08-01"
+    disclaimer_file: "legal/nyfed-reference-rates.txt"
+    reviewed_at: "2026-08-01"
+    review_expires_at: "2027-08-01"
+  yfinance:
+    approval_status: approved
+    rights_basis: "Yahoo Finance personal-use terms; private/personal only"
+    evidence_reference: "YF_REVIEW_2026_08"
+    allowed_modes: [LOCAL_DEMO, PRIVATE_PERSONAL]     # personal-use only -> private only
+    allowed_uses: [persistence, ai_input, private_dashboard, private_telegram]
+    attribution_required: true
+    reviewed_at: "2026-08-01"
+    review_expires_at: "2027-08-01"
+  gdelt:
+    approval_status: approved
+    rights_basis: "GDELT open data; no attribution required for headlines metadata"
+    evidence_reference: "GDELT_REVIEW_2026_08"
+    allowed_modes: [LOCAL_DEMO, PRIVATE_PERSONAL]
+    allowed_uses: [persistence, ai_input, private_dashboard, private_telegram]
+    attribution_required: false
+    reviewed_at: "2026-08-01"
+    review_expires_at: "2027-08-01"
