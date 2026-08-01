@@ -319,6 +319,7 @@ jobs:
           	host = os.environ["APP_HOST"]
           	headers = {
           	    "Authorization": "Basic " + base64.b64encode(("ci:" + os.environ["DASHBOARD_PASSWORD"]).encode()).decode(),
+          	    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
           	}
           	cache_bust = f"?_smoke={int(time.time())}"
 
@@ -440,6 +441,7 @@ jobs:
           	host = os.environ["APP_HOST"]
           	headers = {
           	    "Authorization": "Basic " + base64.b64encode(("ci:" + os.environ["DASHBOARD_PASSWORD"]).encode()).decode(),
+          	    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
           	}
           	cache_bust = f"?_smoke_rollback={int(time.time())}"
 
