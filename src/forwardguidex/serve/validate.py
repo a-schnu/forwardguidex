@@ -83,6 +83,8 @@ def _timestamp_errors(payload: dict) -> list[str]:
                 errs.append(f"{where}[{i}].as_of: unparseable {a!r}")
     check_items(payload.get("indices"), "indices")
     check_items(payload.get("futures"), "futures")
+    check_items(payload.get("etfs"), "etfs")
+    check_items(payload.get("crypto"), "crypto")
     for si, sec in enumerate(payload.get("sectors", []) or []):
         check_items(sec.get("etfs"), f"sectors[{si}].etfs")
         check_items(sec.get("constituents"), f"sectors[{si}].constituents")
@@ -117,6 +119,8 @@ def _anomaly_errors(payload: dict) -> list[str]:
 
     scan_price(payload.get("indices"), "indices")
     scan_price(payload.get("futures"), "futures")
+    scan_price(payload.get("etfs"), "etfs")
+    scan_price(payload.get("crypto"), "crypto")
     for si, sec in enumerate(payload.get("sectors", []) or []):
         scan_price(sec.get("etfs"), f"sectors[{si}].etfs")
         scan_price(sec.get("constituents"), f"sectors[{si}].constituents")

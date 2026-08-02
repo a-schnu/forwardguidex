@@ -1,0 +1,4 @@
+Source: Bank for International Settlements (BIS).
+Central bank policy rates are reproduced from BIS statistics (stats.bis.org)
+for informational, non-commercial personal use with attribution. The BIS does
+not endorse ForwardGuidex.

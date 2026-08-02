@@ -30,7 +30,7 @@ CADENCE = "EOD"
 DELIVERY = "STATIC"
 
 _SOURCE_LABELS = [("yfinance", "yfinance"), ("us_treasury", "UST"),
-                  ("ny_fed", "NYFed"), ("gdelt", "GDELT")]
+                  ("ny_fed", "NYFed"), ("bis", "BIS"), ("gdelt", "GDELT")]
 
 
 # --------------------------------------------------------------------------- #
@@ -84,32 +84,115 @@ def _now_iso(now: datetime | None = None) -> str:
 # --------------------------------------------------------------------------- #
 # Warehouse -> payload
 # --------------------------------------------------------------------------- #
-def _price_item(row, *, source="yfinance", currency="USD", with_sector=False) -> dict:
+def _fx_eur_map(rows) -> dict[str, float]:
+    """Map currency -> units of that currency per 1 EUR.
+
+    Built from role ``"fx"`` rows whose ticker is ``EUR{CUR}=X`` (e.g. EURJPY=X
+    -> {"JPY": <last_close>}). These rows are never emitted into any section.
+    """
+    fx: dict[str, float] = {}
+    for r in rows:
+        if r.get("role") != "fx":
+            continue
+        t = _str(r.get("ticker")) or ""
+        rate = _num(r.get("last_close"))
+        if rate and t.startswith("EUR") and t.endswith("=X"):
+            fx[t[3:-2]] = rate
+    return fx
+
+
+def _eur_price(last, ccy, fx):
+    """Convert `last` (quoted in `ccy`) to EUR, or None when not convertible."""
+    if last is None:
+        return None
+    if ccy == "EUR":
+        return _num(last)
+    if not fx:
+        return None
+    rate = fx.get(ccy)
+    return _num(last / rate) if rate else None
+
+
+def _price_item(row, *, source="yfinance", with_sector=False, fx=None) -> dict:
     r1 = _num(row.get("ret_1d"))
+    last = _num(row.get("last_close"))
+    ccy = _str(row.get("ccy"), default="USD")
     item = {
         "ticker": _str(row.get("ticker")),
         "name": _str(row.get("name"), default=_str(row.get("ticker"))),
-        "last": _num(row.get("last_close")),
-        "currency": currency,
+        "last": last,
+        "currency": ccy,
         "ret_1d": r1,
         "ret_5d": _num(row.get("ret_5d")),
         "as_of": _iso(row.get("last_date")),
         "source": source,
         "quality": "OK" if r1 is not None else "PARTIAL",
     }
+    eur = _eur_price(last, ccy, fx)
+    if eur is not None:
+        item["eur"] = eur
     if with_sector:
         item["sector"] = _str(row.get("sector_label"))
     return item
 
 
+def _spark_map(con, n: int = 30) -> dict[str, list]:
+    """ticker -> last ~n daily closes (oldest first) for sparklines.
+
+    One grouped query over raw_prices; returns {} if the table is absent so the
+    export never fails when history has not been ingested yet.
+    """
+    from ..db import table_exists
+
+    if not table_exists(con, "raw_prices"):
+        return {}
+    df = con.execute(
+        """
+        WITH ranked AS (
+            SELECT ticker, date, close,
+                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) AS rn
+            FROM raw_prices
+        )
+        SELECT ticker, close FROM ranked WHERE rn <= ? ORDER BY ticker, date ASC
+        """,
+        [n],
+    ).df()
+    out: dict[str, list] = {}
+    for row in df.itertuples(index=False):
+        out.setdefault(str(row.ticker), []).append(_num(row.close))
+    return out
+
+
+def _attach_spark(items: list[dict], spark_map: dict[str, list]) -> None:
+    """Attach a `spark` array to each price item that has recent history."""
+    for it in items:
+        s = spark_map.get(it.get("ticker"))
+        if s:
+            it["spark"] = s
+
+
 def _universe_rows(con):
     return con.execute(
         """
-        SELECT g.ticker, d.name, d.role, d.sector_key, d.sector_label,
+        SELECT g.ticker, d.name, d.ccy, d.role, d.sector_key, d.sector_label,
                g.last_close, g.ret_1d, g.ret_5d, g.last_date
         FROM gold_latest g LEFT JOIN dim_ticker d USING (ticker)
         """
     ).df()
+
+
+def _sector_order(universe: dict) -> dict[str, dict[str, int]]:
+    """Per-sector ``{ticker: position}`` from the universe file (``etfs`` then
+    ``names``). Makes the universe file the single source of truth for the
+    display order of each sector's members (the SQL SELECT is unordered)."""
+    out: dict[str, dict[str, int]] = {}
+    for key, sec in (universe.get("sectors", {}) or {}).items():
+        order: dict[str, int] = {}
+        for entry in (sec.get("etfs", []) or []) + (sec.get("names", []) or []):
+            t = config.normalize_entry(entry)["ticker"]
+            order.setdefault(t, len(order))
+        out[key] = order
+    return out
 
 
 def build_snapshot(con, *, market_state: str = "PRE_OPEN",
@@ -117,22 +200,27 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
     now = now or datetime.now(timezone.utc)
     uni = _universe_rows(con)
     rows = [r._asdict() if hasattr(r, "_asdict") else dict(r) for _, r in uni.iterrows()]
+    fx = _fx_eur_map(rows)  # role "fx" rows -> currency conversion map (not rendered)
 
-    indices, futures, equities = [], [], []
+    indices, futures, etfs, crypto, equities = [], [], [], [], []
     by_sector: dict[str, dict] = {}
     for r in rows:
         role = r.get("role")
         if role == "index":
-            indices.append(_price_item(r))
+            indices.append(_price_item(r, fx=fx))
         elif role == "future":
-            futures.append(_price_item(r))
+            futures.append(_price_item(r, fx=fx))
+        elif role == "fund":
+            etfs.append(_price_item(r, fx=fx))
+        elif role == "crypto":
+            crypto.append(_price_item(r, fx=fx))
         elif role in ("etf", "name"):
             equities.append(r)
             key = r.get("sector_key")
             if key:
                 sec = by_sector.setdefault(key, {"key": key, "label": _str(r.get("sector_label")),
                                                  "etfs": [], "constituents": []})
-                item = _price_item(r)
+                item = _price_item(r, fx=fx)
                 if role == "etf":
                     item["role"] = "etf"
                     sec["etfs"].append(item)
@@ -140,9 +228,14 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
                     item["role"] = "constituent"
                     sec["constituents"].append(item)
 
+    order_map = _sector_order(config.load_universe())
     sectors = []
     for key in sorted(by_sector):
         sec = by_sector[key]
+        # Deterministic member order = universe order (SELECT is unordered).
+        order = order_map.get(key, {})
+        sec["etfs"].sort(key=lambda it: order.get(it["ticker"], 1_000_000))
+        sec["constituents"].sort(key=lambda it: order.get(it["ticker"], 1_000_000))
         members = sec["etfs"] + sec["constituents"]
         r1 = [m["ret_1d"] for m in members if m["ret_1d"] is not None]
         r5 = [m["ret_5d"] for m in members if m["ret_5d"] is not None]
@@ -150,8 +243,21 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
         sec["avg_ret_5d"] = _num(sum(r5) / len(r5)) if r5 else None
         sectors.append(sec)
 
-    # movers over the equities (names + etfs)
-    scored = [_price_item(r, with_sector=True) for r in equities if r.get("ret_1d") is not None]
+    # Sparklines: last ~30 daily closes per ticker on each price item.
+    spark_map = _spark_map(con)
+    _attach_spark(indices, spark_map)
+    _attach_spark(futures, spark_map)
+    _attach_spark(etfs, spark_map)
+    _attach_spark(crypto, spark_map)
+    for sec in sectors:
+        _attach_spark(sec["etfs"], spark_map)
+        _attach_spark(sec["constituents"], spark_map)
+
+    # movers = the true biggest winners/losers across all sector CONSTITUENTS
+    # (role "name") only — sector/standalone ETFs, indices, futures and crypto
+    # are excluded so movers reflects real company stocks.
+    scored = [_price_item(r, with_sector=True, fx=fx) for r in equities
+              if r.get("role") == "name" and r.get("ret_1d") is not None]
     scored.sort(key=lambda x: x["ret_1d"], reverse=True)
     movers = {"gainers": scored[:6], "losers": list(reversed(scored[-6:])) if scored else []}
 
@@ -200,6 +306,8 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
     payload = {
         "indices": indices,
         "futures": futures,
+        "etfs": etfs,
+        "crypto": crypto,
         "sectors": sectors,
         "rates": rate_items,
         "movers": movers,
@@ -221,7 +329,7 @@ def _source_string(keys: set[str]) -> str:
 
 def _all_as_of(payload: dict) -> list[str]:
     out: list[str] = []
-    for s in ("indices", "futures"):
+    for s in ("indices", "futures", "etfs", "crypto"):
         out += [i["as_of"] for i in payload.get(s, []) if i.get("as_of")]
     for sec in payload.get("sectors", []):
         out += [i["as_of"] for i in sec.get("etfs", []) + sec.get("constituents", []) if i.get("as_of")]
@@ -231,7 +339,7 @@ def _all_as_of(payload: dict) -> list[str]:
 
 def _market_as_of(payload: dict) -> list[str]:
     out: list[str] = []
-    for s in ("indices", "futures"):
+    for s in ("indices", "futures", "etfs", "crypto"):
         out += [i["as_of"] for i in payload.get(s, []) if i.get("as_of")]
     for sec in payload.get("sectors", []):
         out += [i["as_of"] for i in sec.get("etfs", []) + sec.get("constituents", []) if i.get("as_of")]
@@ -347,51 +455,194 @@ def write_bundle(payload: dict, out_dir, *, demo: bool = False) -> dict:
 # --------------------------------------------------------------------------- #
 def demo_snapshot(now: datetime | None = None) -> dict:
     now = now or datetime(2026, 8, 1, 8, 0, tzinfo=timezone.utc)
-    eq, ust, nf, seen = "2026-07-31T20:00:00+00:00", "2026-07-31", "2026-07-30", "20260731T120000Z"
+    eq, ust, nf, bis, seen = ("2026-07-31T20:00:00+00:00", "2026-07-31",
+                              "2026-07-30", "2026-07-31", "20260731T120000Z")
 
-    def eqi(t, n, last, r1, r5, sector=None):
-        d = {"ticker": t, "name": n, "last": last, "currency": "USD",
+    def spark(end, pct_5d, n=24):
+        """A gentle ~n-point series ending near `end`, drifting ~pct_5d% overall."""
+        start = end / (1 + pct_5d / 100.0) if (1 + pct_5d / 100.0) else end
+        out = []
+        for i in range(n):
+            f = i / (n - 1)
+            base = start + (end - start) * f
+            out.append(round(base + base * 0.004 * math.sin(i * 1.3), 4))
+        return out
+
+    # Rough EUR crosses (units of CUR per 1 EUR) for the demo's per-item EUR price.
+    fx = {"USD": 1.1527, "GBP": 0.8551, "JPY": 181.5, "HKD": 9.03, "CNY": 7.76, "KRW": 1662.0}
+
+    def eqi(t, n, last, r1, r5, sector=None, ccy="USD"):
+        d = {"ticker": t, "name": n, "last": last, "currency": ccy,
              "ret_1d": r1, "ret_5d": r5, "as_of": eq, "source": "yfinance", "quality": "OK"}
+        eur = last if ccy == "EUR" else (
+            round(last / fx[ccy], 6) if (ccy in fx and last is not None) else None)
+        if eur is not None:
+            d["eur"] = eur
         if sector:
             d["sector"] = sector
         return d
 
+    # (ticker, name, last, ret_1d, ret_5d, role, ccy) — real constituent names,
+    # non-USD listings tagged with their local currency (EUR/GBP).
     sectors_def = [
-        ("oil_gas", "Oil & Gas", 1.8, [("XLE", "Energy SPDR", 92.4, 1.8, 3.1, "etf"),
-            ("XOM", "Exxon", 118.2, 2.1, 3.4, "constituent"), ("CVX", "Chevron", 162.5, 1.6, 2.2, "constituent")]),
-        ("defense", "Defense & Aerospace", 2.4, [("ITA", "Aerospace/Def", 148.0, 2.4, 4.0, "etf"),
-            ("LMT", "Lockheed", 512.3, 1.9, 2.7, "constituent"), ("RTX", "RTX", 121.4, 2.8, 3.9, "constituent")]),
-        ("staples", "Consumer Staples", -0.3, [("XLP", "Staples SPDR", 79.1, -0.3, 0.4, "etf"),
-            ("PG", "P&G", 168.9, -0.1, 0.2, "constituent"), ("KO", "Coca-Cola", 63.7, -0.4, -0.1, "constituent")]),
-        ("software", "Tech Software", 0.9, [("IGV", "Software ETF", 92.0, 0.9, 2.3, "etf"),
-            ("MSFT", "Microsoft", 452.6, 0.7, 1.8, "constituent"), ("CRM", "Salesforce", 268.1, 1.4, 2.9, "constituent")]),
-        ("semis", "Tech Hardware / Semis", -1.1, [("SMH", "Semis ETF", 245.7, -1.1, -2.4, "etf"),
-            ("NVDA", "Nvidia", 168.3, -1.8, -3.2, "constituent"), ("AMD", "AMD", 172.9, -0.9, -1.7, "constituent")]),
-        ("industrials", "Infrastructure & Industrials", 0.5, [("XLI", "Industrials SPDR", 138.2, 0.5, 1.2, "etf"),
-            ("CAT", "Caterpillar", 402.5, 0.9, 1.9, "constituent"), ("DE", "Deere", 421.0, 0.4, 0.8, "constituent")]),
+        ("oil_gas", "Oil & Gas", 1.8, [
+            ("XLE", "Energy Select Sector SPDR", 92.4, 1.8, 3.1, "etf", "USD"),
+            ("XOP", "SPDR S&P Oil & Gas E&P", 148.7, 2.0, 3.6, "etf", "USD"),
+            ("EXH1.DE", "iShares STOXX Europe 600 Oil & Gas", 42.8, 1.6, 2.9, "etf", "EUR"),
+            ("XOM", "Exxon Mobil", 118.2, 2.1, 3.4, "constituent", "USD"),
+            ("CVX", "Chevron", 162.5, 1.6, 2.2, "constituent", "USD"),
+            ("COP", "ConocoPhillips", 108.9, 1.9, 2.8, "constituent", "USD"),
+            ("EQNR", "Equinor", 27.4, 1.2, 1.9, "constituent", "USD"),
+            ("SPM.MI", "Saipem", 2.31, 2.4, 4.1, "constituent", "EUR")]),
+        ("defense", "Defense & Aerospace", 2.4, [
+            ("ITA", "iShares U.S. Aerospace & Defense", 148.0, 2.4, 4.0, "etf", "USD"),
+            ("XAR", "SPDR S&P Aerospace & Defense", 168.9, 2.6, 4.3, "etf", "USD"),
+            ("DFEN.DE", "VanEck Defense", 58.4, 3.0, 5.6, "etf", "EUR"),
+            ("NATO.L", "HANetf Future of Defence", 18.9, 2.7, 4.9, "etf", "USD"),
+            ("LMT", "Lockheed Martin", 512.3, 1.9, 2.7, "constituent", "USD"),
+            ("RTX", "RTX", 121.4, 2.8, 3.9, "constituent", "USD"),
+            ("NOC", "Northrop Grumman", 498.1, 1.7, 2.5, "constituent", "USD"),
+            ("LDO.MI", "Leonardo", 24.8, 3.1, 5.2, "constituent", "EUR"),
+            ("RHM.DE", "Rheinmetall", 612.5, 3.4, 6.0, "constituent", "EUR")]),
+        ("staples", "Consumer Staples", -0.3, [
+            ("XLP", "Consumer Staples Select Sector SPDR", 79.1, -0.3, 0.4, "etf", "USD"),
+            ("VDC", "Vanguard Consumer Staples", 214.6, -0.2, 0.3, "etf", "USD"),
+            ("EXH9.DE", "iShares STOXX Europe 600 Food & Beverage", 132.7, -0.3, 0.2, "etf", "EUR"),
+            ("XDWS.DE", "Xtrackers MSCI World Consumer Staples", 38.4, -0.2, 0.3, "etf", "EUR"),
+            ("PG", "Procter & Gamble", 168.9, -0.1, 0.2, "constituent", "USD"),
+            ("KO", "Coca-Cola", 63.7, -0.4, -0.1, "constituent", "USD"),
+            ("PEP", "PepsiCo", 172.4, -0.5, -0.3, "constituent", "USD"),
+            ("COST", "Costco", 892.7, 0.2, 0.9, "constituent", "USD")]),
+        ("software", "Tech Software", 0.9, [
+            ("IGV", "iShares Expanded Tech-Software", 92.0, 0.9, 2.3, "etf", "USD"),
+            ("WCLD", "WisdomTree Cloud Computing", 34.2, 1.1, 2.7, "etf", "USD"),
+            ("XDWT.DE", "Xtrackers MSCI World Information Technology", 68.9, 0.8, 2.0, "etf", "EUR"),
+            ("EXV3.DE", "iShares STOXX Europe 600 Technology", 112.4, 0.9, 2.2, "etf", "EUR"),
+            ("MSFT", "Microsoft", 452.6, 0.7, 1.8, "constituent", "USD"),
+            ("CRM", "Salesforce", 268.1, 1.4, 2.9, "constituent", "USD"),
+            ("ORCL", "Oracle", 214.3, 0.8, 2.1, "constituent", "USD"),
+            ("NOW", "ServiceNow", 902.4, 1.0, 2.4, "constituent", "USD")]),
+        ("semis", "Tech Hardware / Semis", -1.1, [
+            ("SMH", "VanEck Semiconductor", 245.7, -1.1, -2.4, "etf", "USD"),
+            ("SOXX", "iShares Semiconductor", 228.9, -1.0, -2.2, "etf", "USD"),
+            ("VVSM.DE", "VanEck Semiconductor UCITS", 42.6, -1.1, -2.5, "etf", "EUR"),
+            ("AAPL", "Apple", 228.5, -0.4, -0.8, "constituent", "USD"),
+            ("NVDA", "Nvidia", 168.3, -1.8, -3.2, "constituent", "USD"),
+            ("AMD", "AMD", 172.9, -0.9, -1.7, "constituent", "USD"),
+            ("TSM", "TSMC", 188.4, -0.7, -1.4, "constituent", "USD"),
+            ("ASML", "ASML", 942.1, -1.2, -2.6, "constituent", "USD"),
+            ("MU", "Micron", 118.6, -1.5, -2.9, "constituent", "USD"),
+            ("IFX.DE", "Infineon", 33.7, -0.8, -1.9, "constituent", "EUR")]),
+        ("industrials", "Infrastructure & Industrials", 0.5, [
+            ("XLI", "Industrial Select Sector SPDR", 138.2, 0.5, 1.2, "etf", "USD"),
+            ("PAVE", "Global X U.S. Infrastructure Development", 41.8, 0.7, 1.5, "etf", "USD"),
+            ("EXH4.DE", "iShares STOXX Europe 600 Industrial Goods & Services", 168.3, 0.6, 1.4, "etf", "EUR"),
+            ("CAT", "Caterpillar", 402.5, 0.9, 1.9, "constituent", "USD"),
+            ("DE", "Deere", 421.0, 0.4, 0.8, "constituent", "USD"),
+            ("HON", "Honeywell", 214.7, 0.3, 0.7, "constituent", "USD"),
+            ("GE", "GE Aerospace", 178.9, 0.8, 1.6, "constituent", "USD"),
+            ("PRY.MI", "Prysmian", 62.4, 0.6, 1.3, "constituent", "EUR")]),
+        ("internet", "Internet & Platforms", 1.3, [
+            ("KWEB", "KraneShares CSI China Internet", 32.1, 1.3, 2.8, "etf", "USD"),
+            ("FDN", "First Trust Dow Jones Internet", 244.6, 1.0, 2.1, "etf", "USD"),
+            ("KWEB.L", "KraneShares CSI China Internet UCITS", 28.7, 1.4, 2.9, "etf", "USD"),
+            ("TCEHY", "Tencent", 54.8, 1.6, 3.4, "constituent", "USD"),
+            ("BABA", "Alibaba", 84.2, 1.1, 2.3, "constituent", "USD")]),
+        ("financials", "Banks & Financials", 0.7, [
+            ("XLF", "Financial Select Sector SPDR", 48.9, 0.7, 1.4, "etf", "USD"),
+            ("EUFN", "iShares MSCI Europe Financials", 26.3, 0.9, 1.8, "etf", "USD"),
+            ("EXX1.DE", "iShares STOXX Europe 600 Banks", 22.4, 1.1, 2.3, "etf", "EUR"),
+            ("UCG.MI", "UniCredit", 41.6, 1.2, 2.5, "constituent", "EUR"),
+            ("DB", "Deutsche Bank", 18.7, 1.0, 2.0, "constituent", "USD")]),
+        ("healthcare", "Healthcare & Pharma", -0.2, [
+            ("XLV", "Health Care Select Sector SPDR", 148.3, -0.2, 0.3, "etf", "USD"),
+            ("IHE", "iShares U.S. Pharmaceuticals", 62.7, -0.1, 0.4, "etf", "USD"),
+            ("EXV4.DE", "iShares STOXX Europe 600 Health Care", 148.6, -0.2, 0.3, "etf", "EUR"),
+            ("XDWH.DE", "Xtrackers MSCI World Health Care", 54.2, -0.1, 0.4, "etf", "EUR"),
+            ("SNY", "Sanofi", 52.4, -0.3, 0.1, "constituent", "USD"),
+            ("JNJ", "Johnson & Johnson", 162.8, -0.1, 0.2, "constituent", "USD")]),
+        ("materials", "Materials & Mining", 1.1, [
+            ("XME", "SPDR S&P Metals & Mining", 68.4, 1.1, 2.4, "etf", "USD"),
+            ("GDX", "VanEck Gold Miners", 42.9, 1.4, 3.0, "etf", "USD"),
+            ("EXV6.DE", "iShares STOXX Europe 600 Basic Resources", 58.7, 1.0, 2.2, "etf", "EUR"),
+            ("GLEN.L", "Glencore", 3.98, 0.9, 2.1, "constituent", "GBP"),
+            ("BHP", "BHP", 58.6, 1.0, 2.2, "constituent", "USD"),
+            ("AEM", "Agnico Eagle Mines", 92.7, 1.6, 3.3, "constituent", "USD")]),
+        ("utilities", "Utilities & Power", 0.4, [
+            ("XLU", "Utilities Select Sector SPDR", 78.2, 0.4, 0.9, "etf", "USD"),
+            ("JXI", "iShares Global Utilities", 74.1, 0.3, 0.8, "etf", "USD"),
+            ("EXV5.DE", "iShares STOXX Europe 600 Utilities", 42.9, 0.4, 1.0, "etf", "EUR"),
+            ("XDWU.DE", "Xtrackers MSCI World Utilities", 46.8, 0.3, 0.9, "etf", "EUR"),
+            ("EOAN.DE", "E.ON", 13.6, 0.5, 1.1, "constituent", "EUR"),
+            ("ELI.BR", "Elia Group", 92.4, 0.2, 0.6, "constituent", "EUR")]),
     ]
     sectors = []
     all_eq = []
     for key, label, avg, members in sectors_def:
         etfs, cons = [], []
-        for t, n, last, r1, r5, role in members:
-            it = eqi(t, n, last, r1, r5)
+        for t, n, last, r1, r5, role, ccy in members:
+            it = eqi(t, n, last, r1, r5, ccy=ccy)
             it["role"] = role
             (etfs if role == "etf" else cons).append(it)
-            all_eq.append(eqi(t, n, last, r1, r5, sector=label))
+            # movers rank real company stocks only (constituents), never ETFs.
+            if role == "constituent":
+                all_eq.append(eqi(t, n, last, r1, r5, sector=label, ccy=ccy))
         r5s = [m["ret_5d"] for m in etfs + cons]
         sectors.append({"key": key, "label": label, "avg_ret_1d": avg,
                         "avg_ret_5d": round(sum(r5s) / len(r5s), 2), "etfs": etfs, "constituents": cons})
 
     all_eq.sort(key=lambda x: x["ret_1d"], reverse=True)
     payload = {
-        "indices": [eqi("^GSPC", "S&P 500", 5620.4, 0.6, 1.4), eqi("^NDX", "Nasdaq 100", 20450.1, -0.2, 0.9),
-                    eqi("^DJI", "Dow Jones", 41230.7, 0.4, 1.1), eqi("^RUT", "Russell 2000", 2280.5, 1.2, 2.0)],
-        "futures": [eqi("CL=F", "WTI Crude", 78.4, 1.9, 3.0), eqi("GC=F", "Gold", 2412.6, 0.3, 0.7),
-                    eqi("ES=F", "S&P e-mini", 5628.0, 0.5, 1.3)],
+        "indices": [
+            # US
+            eqi("^GSPC", "S&P 500", 5620.4, 0.6, 1.4), eqi("^NDX", "Nasdaq 100", 20450.1, -0.2, 0.9),
+            eqi("^DJI", "Dow Jones", 41230.7, 0.4, 1.1), eqi("^RUT", "Russell 2000", 2280.5, 1.2, 2.0),
+            # Europe
+            eqi("^STOXX", "STOXX Europe 600", 524.8, 0.5, 1.3, ccy="EUR"),
+            eqi("^STOXX50E", "Euro Stoxx 50", 5012.6, 0.6, 1.5, ccy="EUR"),
+            eqi("^GDAXI", "DAX", 18942.3, 0.7, 1.8, ccy="EUR"),
+            eqi("^FCHI", "CAC 40", 7614.9, 0.3, 1.0, ccy="EUR"),
+            eqi("^FTSE", "FTSE 100", 8284.1, 0.4, 1.1, ccy="GBP"),
+            eqi("FTSEMIB.MI", "FTSE MIB", 34120.5, 0.8, 2.0, ccy="EUR"),
+            # Asia
+            eqi("^N225", "Nikkei 225", 39820.4, -0.5, 0.6, ccy="JPY"),
+            eqi("^HSI", "Hang Seng", 17640.2, 1.1, 2.4, ccy="HKD"),
+            eqi("000001.SS", "Shanghai Composite", 2984.6, 0.9, 1.7, ccy="CNY"),
+            eqi("^KS11", "KOSPI", 2712.8, -0.3, 0.4, ccy="KRW")],
+        "futures": [
+            eqi("CL=F", "WTI Crude", 78.4, 1.9, 3.0), eqi("BZ=F", "Brent Crude", 82.1, 1.7, 2.8),
+            eqi("NG=F", "Nat Gas", 2.94, -1.2, -2.6), eqi("GC=F", "Gold", 2412.6, 0.3, 0.7),
+            eqi("SI=F", "Silver", 29.8, 0.6, 1.4), eqi("HG=F", "Copper", 4.32, 0.9, 2.1),
+            eqi("PL=F", "Platinum", 968.4, 0.4, 1.0), eqi("ES=F", "S&P e-mini", 5628.0, 0.5, 1.3),
+            eqi("NQ=F", "Nasdaq e-mini", 20475.0, -0.2, 0.8), eqi("DX=F", "US Dollar Index", 104.6, 0.1, 0.4),
+            eqi("6E=F", "Euro FX", 1.084, -0.1, -0.3), eqi("ZC=F", "Corn", 398.2, -0.7, -1.5),
+            eqi("ZW=F", "Wheat", 542.6, -0.4, -1.1), eqi("ZN=F", "10Y T-Note", 110.48, -0.2, -0.5),
+            eqi("ZB=F", "30Y T-Bond", 118.16, -0.4, -0.9), eqi("PA=F", "Palladium", 1024.5, 0.5, 1.3),
+            eqi("RB=F", "RBOB Gasoline", 2.38, 1.6, 2.7), eqi("6B=F", "British Pound", 1.278, 0.2, 0.5)],
+        "etfs": [
+            eqi("XDEW.DE", "Xtrackers S&P 500 Equal Weight", 112.4, 0.5, 1.2, ccy="EUR"),
+            eqi("XMME.DE", "Xtrackers MSCI EM (acc)", 48.9, 0.8, 1.9, ccy="EUR"),
+            eqi("SXRT.DE", "iShares Core Euro Stoxx 50", 168.7, 0.6, 1.5, ccy="EUR"),
+            eqi("VWCE.DE", "Vanguard FTSE All-World (acc)", 128.3, 0.4, 1.1, ccy="EUR"),
+            eqi("ILF", "iShares Latin America 40", 24.6, 1.0, 2.2),
+            eqi("SPY", "SPDR S&P 500", 561.0, 0.6, 1.4), eqi("QQQ", "Invesco QQQ (Nasdaq 100)", 498.4, -0.2, 0.9),
+            eqi("VTI", "Vanguard Total Stock Market", 278.9, 0.5, 1.3), eqi("IWM", "iShares Russell 2000", 226.7, 1.2, 2.0),
+            eqi("GLD", "SPDR Gold Shares", 223.4, 0.3, 0.7), eqi("SLV", "iShares Silver Trust", 27.3, 0.6, 1.4),
+            eqi("TLT", "iShares 20+ Year Treasury Bond", 94.2, -0.4, -1.1),
+            eqi("HYG", "iShares iBoxx $ High Yield Corp Bond", 79.6, 0.1, 0.3),
+            eqi("LQD", "iShares iBoxx $ Inv Grade Corp Bond", 109.4, -0.2, -0.5),
+            eqi("AGG", "iShares Core U.S. Aggregate Bond", 98.7, -0.1, -0.3),
+            eqi("EEM", "iShares MSCI Emerging Markets", 44.8, 0.8, 1.9),
+            eqi("EFA", "iShares MSCI EAFE", 82.5, 0.5, 1.2)],
+        "crypto": [
+            eqi("BTC-USD", "Bitcoin", 63120.0, 1.4, 3.2), eqi("ETH-USD", "Ethereum", 1872.4, 0.9, 2.6),
+            eqi("SOL-USD", "Solana", 73.2, 2.1, 4.8), eqi("XRP-USD", "XRP", 1.08, -0.6, 1.1),
+            eqi("BNB-USD", "BNB", 584.3, 0.7, 1.9)],
         "sectors": sectors,
         "rates": [
             {"series_id": "UST2Y", "name": "US 2Y Treasury Par Yield", "value": 4.28, "chg": 0.05,
+             "as_of": ust, "source": "UST", "quality": "OK"},
+            {"series_id": "UST5Y", "name": "US 5Y Treasury Par Yield", "value": 4.51, "chg": 0.06,
              "as_of": ust, "source": "UST", "quality": "OK"},
             {"series_id": "UST10Y", "name": "US 10Y Treasury Par Yield", "value": 4.75, "chg": 0.07,
              "as_of": ust, "source": "UST", "quality": "OK"},
@@ -401,6 +652,14 @@ def demo_snapshot(now: datetime | None = None) -> dict:
              "as_of": nf, "source": "NYFED", "quality": "OK"},
             {"series_id": "SOFR", "name": "Secured Overnight Financing Rate", "value": 3.65, "chg": 0.01,
              "as_of": nf, "source": "NYFED", "quality": "OK"},
+            {"series_id": "ECBDFR", "name": "ECB Policy Rate (DFR)", "value": 2.00, "chg": 0.0,
+             "as_of": bis, "source": "BIS", "quality": "OK"},
+            {"series_id": "BOEBR", "name": "BoE Bank Rate", "value": 3.75, "chg": -0.25,
+             "as_of": bis, "source": "BIS", "quality": "OK"},
+            {"series_id": "BOJPR", "name": "BoJ Policy Rate", "value": 0.50, "chg": 0.0,
+             "as_of": bis, "source": "BIS", "quality": "OK"},
+            {"series_id": "PBOCLPR1Y", "name": "PBoC Loan Prime Rate 1Y", "value": 3.00, "chg": 0.0,
+             "as_of": bis, "source": "BIS", "quality": "OK"},
         ],
         "movers": {"gainers": all_eq[:6], "losers": list(reversed(all_eq[-6:]))},
         "headlines": [
@@ -414,17 +673,35 @@ def demo_snapshot(now: datetime | None = None) -> dict:
              "url": "https://www.wsj.com/economy", "seendate": seen},
         ],
         "brief": {"markdown": (
-            "## TL;DR\n"
-            "- **Energy +1.8%** on Middle-East supply risk; **Defense +2.4%**.\n"
-            "- **Semis -1.1%** as AI capex guidance is trimmed.\n"
-            "- Risk-off tone: 10Y at **4.75%** (+0.07).\n\n"
-            "## Cross-asset read\n"
-            "Crude firm, gold steady, small-caps outperform. Rates drift higher.\n\n"
-            "## What to watch today\n"
-            "**Short-term trade triggers:** XLE and ITA momentum; SMH near support.\n\n"
-            "**Long-term investment signals:** staples and industrials stable; trend intact.\n"
+            "**Regime: Risk-off** — rotazione verso i difensivi: difesa ed energia "
+            "europee guidano, mentre i semiconduttori USA arretrano sul taglio delle "
+            "stime di capex sull'AI.\n\n"
+            "## Sintesi del giorno\n"
+            "- **USA:** S&P 500 +0.6%, Nasdaq 100 -0.2%; small-cap Russell 2000 +1.2% in controtendenza.\n"
+            "- **Europa:** DAX +0.7%, FTSE MIB +0.8%, CAC 40 +0.3% — banche e difesa in spolvero.\n"
+            "- **Asia:** Hang Seng +1.1% e Shanghai +0.9% in rialzo; Nikkei -0.5%, KOSPI -0.3% deboli.\n"
+            "- **Settori:** **Difesa +2.4%** ed **Energia +1.8%** i migliori; **Semiconduttori -1.1%** il peggiore.\n"
+            "- **Tassi e banche centrali:** UST 10Y al **4.75%** (+0.07); la **BoE taglia 25pb al 3.75%**, "
+            "BCE ferma al 2.00%, BoJ 0.50%, PBoC 3.00%.\n"
+            "- **In evidenza:** Rheinmetall +3.4% traina la difesa europea; Bitcoin **$63.120** (+1.4%).\n\n"
+            "## Cosa tenere d'occhio\n"
+            "**Breve termine (trading)**\n"
+            "- Momentum sulla difesa (DFEN, ITA) sulla scia della forza europea.\n"
+            "- SMH vicino al supporto dopo il calo dei semiconduttori.\n"
+            "- WTI in area $78-80: rottura da monitorare.\n\n"
+            "**Lungo termine (investimento)**\n"
+            "- Staples e industriali stabili, trend intatto.\n"
+            "- Esposizione a difesa ed energia via UCITS europei che allarga la leadership.\n"
+            "- Crypto costruttiva sopra il range precedente.\n"
         ), "created_at": eq},
     }
+    # Sparklines: full history for indices/futures/etfs/crypto, plus the first
+    # couple of instruments in each sector so the frontend has constituent data.
+    for it in payload["indices"] + payload["futures"] + payload["etfs"] + payload["crypto"]:
+        it["spark"] = spark(it["last"], it["ret_5d"])
+    for sec in payload["sectors"]:
+        for it in (sec["etfs"] + sec["constituents"])[:2]:
+            it.setdefault("spark", spark(it["last"], it["ret_5d"]))
     payload["meta"] = _build_meta(payload, market_state="PRE_OPEN", now=now,
                                   quality="OK", is_demo=True)
     return payload

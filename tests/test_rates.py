@@ -21,6 +21,19 @@ _NYFED = {
     ]},
 }
 
+# BIS SDMX-CSV: only REF_AREA / TIME_PERIOD / OBS_VALUE are parsed.
+_BIS_CSV = (
+    "KEY,FREQ,REF_AREA,TIME_PERIOD,OBS_VALUE\n"
+    "D.XM,D,XM,2026-07-30,2.00\n"
+    "D.XM,D,XM,2026-07-31,2.00\n"
+    "D.GB,D,GB,2026-07-30,4.00\n"
+    "D.GB,D,GB,2026-07-31,3.75\n"
+    "D.JP,D,JP,2026-07-30,0.50\n"
+    "D.JP,D,JP,2026-07-31,0.50\n"
+    "D.CN,D,CN,2026-07-30,3.10\n"
+    "D.CN,D,CN,2026-07-31,3.00\n"
+)
+
 
 class _Resp:
     def __init__(self, *, text="", payload=None):
@@ -41,6 +54,8 @@ def _fake_get(url, **kw):
     if "newyorkfed" in url:
         rate = "effr" if "/effr/" in url else "sofr"
         return _Resp(payload=_NYFED[rate])
+    if "bis.org" in url:
+        return _Resp(text=_BIS_CSV)
     raise AssertionError(f"unexpected url {url}")
 
 
@@ -57,6 +72,7 @@ def test_ingest_rates_sources_and_counts(con, monkeypatch):
     counts = dict(zip(df["source"], df["c"]))
     assert counts["UST"] == 8      # 4 maturities x 2 dates (deduped across years)
     assert counts["NYFED"] == 4    # EFFR + SOFR, 2 dates each
+    assert counts["BIS"] == 8      # ECB/BoE/BoJ/PBoC, 2 dates each
 
 
 def test_treasury_values_mapped(con, monkeypatch):
@@ -75,3 +91,26 @@ def test_nyfed_effr_latest(con, monkeypatch):
         "SELECT value, source FROM raw_macro WHERE series_id='EFFR' ORDER BY date DESC LIMIT 1"
     ).fetchone()
     assert row[0] == pytest.approx(3.63) and row[1] == "NYFED"
+
+
+def test_bis_boe_mapped_and_latest(con, monkeypatch):
+    monkeypatch.setattr(rates.requests, "get", _fake_get)
+    rates.ingest_rates(con)
+    row = con.execute(
+        "SELECT value, name, source FROM raw_macro WHERE series_id='BOEBR' ORDER BY date DESC LIMIT 1"
+    ).fetchone()
+    assert row[0] == pytest.approx(3.75) and row[1] == "BoE Bank Rate" and row[2] == "BIS"
+
+
+def test_bis_failure_is_non_blocking(con, monkeypatch):
+    """A BIS outage must not block UST/NYFed ingest (fail-open per source)."""
+    def _get(url, **kw):
+        if "bis.org" in url:
+            raise RuntimeError("boom")
+        return _fake_get(url, **kw)
+
+    monkeypatch.setattr(rates.requests, "get", _get)
+    n = rates.ingest_rates(con)
+    assert n > 0
+    srcs = {r[0] for r in con.execute("SELECT DISTINCT source FROM raw_macro").fetchall()}
+    assert srcs == {"UST", "NYFED"}  # BIS dropped, others unaffected

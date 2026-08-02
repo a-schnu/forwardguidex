@@ -15,11 +15,8 @@
 <header>
   <div class="wrap"><div class="nav glass">
     <div class="brand">ForwardGuidex</div>
-    <span class="badge" id="badge" title="Stato impostato dalla pipeline">—</span>
-    <span class="market"><span class="market-dot" id="marketDot"></span><span id="marketLabel" class="muted"></span></span>
     <span class="spacer"></span>
     <span class="asof muted">Dati al <span id="dataAsOf">—</span></span>
-    <span class="disclaimer">Non è consulenza finanziaria</span>
   </div></div>
 </header>
 
@@ -28,20 +25,26 @@
   <section class="block first">
     <div class="wrap">
       <div class="head reveal">
-        <div class="eyebrow">Panoramica</div>
-        <h2>Indici &amp; futures</h2>
+        <div class="eyebrow">Overview</div>
+        <h2>Mercati in sintesi</h2>
+        <p>Lo stato dei principali mercati globali: indici, futures, ETF e criptovalute.</p>
       </div>
-      <div class="kpis" id="kpis"></div>
+      <div class="ov-tabs reveal">
+        <div class="tablist" role="tablist" aria-label="Classi di attività" id="ovTablist"></div>
+        <p class="tab-desc muted" id="ovTabDesc"></p>
+        <div class="ov-panels" id="ovPanels"></div>
+      </div>
     </div>
   </section>
 
   <section class="block" id="settori">
     <div class="wrap">
       <div class="head reveal">
-        <div class="eyebrow">Settori</div>
-        <h2>Sei settori. Aprili.</h2>
-        <p>Trascina. Tocca per aprire il dettaglio.</p>
+        <div class="eyebrow">Overview settoriale</div>
+        <h2>Esplora nel dettaglio</h2>
+        <p>Performance per settore; tocca una card per il dettaglio completo.</p>
       </div>
+      <div class="sector-bars reveal" id="sectorBars" hidden></div>
     </div>
     <div class="wrap">
       <div class="track" id="track"></div>
@@ -54,6 +57,17 @@
       <div class="head reveal">
         <div class="eyebrow">Tassi</div>
         <h2>Curva Treasury &amp; tassi di riferimento</h2>
+        <p>Curva dei rendimenti dei Treasury USA e tassi guida delle principali banche centrali.</p>
+      </div>
+      <div class="yc-wrap glass reveal" id="yieldCurveWrap" data-viz hidden>
+        <div class="yc-head">
+          <div class="yc-title">Curva dei rendimenti UST</div>
+          <div class="yc-sub muted">Rendimenti par dei Treasury per scadenza</div>
+        </div>
+        <div class="yc-chart">
+          <div id="yieldCurve"></div>
+          <div class="yc-tip" id="ycTip" role="status" aria-live="polite"></div>
+        </div>
       </div>
       <div class="rates-strip" id="ratesStrip"></div>
     </div>
@@ -64,6 +78,7 @@
       <div class="head reveal">
         <div class="eyebrow">Movimenti</div>
         <h2>Chi sale, chi scende</h2>
+        <p>I titoli che salgono e scendono di più nella giornata.</p>
       </div>
       <div class="movers reveal">
         <div class="mv-col glass">
@@ -83,6 +98,7 @@
       <div class="head reveal">
         <div class="eyebrow">Notizie</div>
         <h2>Titoli del giorno</h2>
+        <p>Titoli di giornata che possono muovere i mercati nel breve termine.</p>
       </div>
       <div class="headlines" id="headlines"></div>
     </div>
@@ -93,6 +109,7 @@
       <div class="head reveal">
         <div class="eyebrow">Morning Brief</div>
         <h2>La lettura di oggi</h2>
+        <p>La sintesi del giorno e cosa tenere d'occhio.</p>
       </div>
       <div class="brief glass reveal">
         <div class="when" id="briefWhen"></div>
@@ -122,6 +139,7 @@
     <div class="attrib">
       <div class="attr-block" id="attrTreasury"></div>
       <div class="attr-block" id="attrNyfed"></div>
+      <div class="attr-block" id="attrBis"></div>
     </div>
   </div>
 </footer>

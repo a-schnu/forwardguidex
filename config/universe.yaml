@@ -1,54 +1,234 @@
 # ForwardGuidex — investment universe & data-source config
-# Edit freely: add tickers, Treasury maturities, NY Fed rates, or GDELT queries.
-# Rates come from primary sources (US Treasury + NY Fed) — FRED was removed for
-# compliance (its terms conflict with persistence + LLM use). See config/sources.yaml.
+# Edit freely: add tickers, Treasury maturities, NY Fed / BIS rates, or GDELT queries.
+# Rates come from primary sources (US Treasury + NY Fed) and the BIS central-bank
+# policy-rate statistics — FRED was removed for compliance (its terms conflict with
+# persistence + LLM use). See config/sources.yaml.
+#
+# Every price entry may be a bare ticker string OR a mapping {ticker, name, ccy}.
+# `ccy` defaults to "USD" and `name` to null. Currencies are controlled here (never
+# taken from yfinance) so the snapshot currency enum can never be surprised.
 
 indexes:
+  # US
   - {ticker: "^GSPC", name: "S&P 500"}
   - {ticker: "^DJI",  name: "Dow Jones"}
   - {ticker: "^NDX",  name: "Nasdaq 100"}
   - {ticker: "^RUT",  name: "Russell 2000"}
+  # Europe
+  - {ticker: "^STOXX",     name: "STOXX Europe 600", ccy: "EUR"}
+  - {ticker: "^STOXX50E",  name: "Euro Stoxx 50",    ccy: "EUR"}
+  - {ticker: "^GDAXI",     name: "DAX",              ccy: "EUR"}
+  - {ticker: "^FCHI",      name: "CAC 40",           ccy: "EUR"}
+  - {ticker: "^FTSE",      name: "FTSE 100",         ccy: "GBP"}
+  - {ticker: "FTSEMIB.MI", name: "FTSE MIB",         ccy: "EUR"}
+  # Asia
+  - {ticker: "^N225",      name: "Nikkei 225",          ccy: "JPY"}
+  - {ticker: "^HSI",       name: "Hang Seng",           ccy: "HKD"}
+  - {ticker: "000001.SS",  name: "Shanghai Composite",  ccy: "CNY"}
+  - {ticker: "^KS11",      name: "KOSPI",               ccy: "KRW"}
 
 futures:
   - {ticker: "CL=F",  name: "WTI Crude"}
   - {ticker: "BZ=F",  name: "Brent Crude"}
   - {ticker: "NG=F",  name: "Nat Gas"}
   - {ticker: "GC=F",  name: "Gold"}
+  - {ticker: "SI=F",  name: "Silver"}
+  - {ticker: "HG=F",  name: "Copper"}
+  - {ticker: "PL=F",  name: "Platinum"}
   - {ticker: "ES=F",  name: "S&P e-mini"}
   - {ticker: "NQ=F",  name: "Nasdaq e-mini"}
   - {ticker: "RTY=F", name: "Russell e-mini"}
   - {ticker: "YM=F",  name: "Dow e-mini"}
+  - {ticker: "DX=F",  name: "US Dollar Index"}
+  - {ticker: "6E=F",  name: "Euro FX"}
+  - {ticker: "ZC=F",  name: "Corn"}
+  - {ticker: "ZW=F",  name: "Wheat"}
+  - {ticker: "ZN=F",  name: "10Y T-Note"}
+  - {ticker: "ZB=F",  name: "30Y T-Bond"}
+  - {ticker: "PA=F",  name: "Palladium"}
+  - {ticker: "RB=F",  name: "RBOB Gasoline"}
+  - {ticker: "6B=F",  name: "British Pound"}
+
+# Standalone ETFs (role "fund") — surfaced as the snapshot's top-level `etfs` block.
+# Primary listings are the EUR-denominated European lines; US-listed fallbacks
+# (RSP/IEMG/FEZ/VT, all USD) are noted in comments should a primary lack history.
+etfs:
+  - {ticker: "XDEW.DE", name: "Xtrackers S&P 500 Equal Weight", ccy: "EUR"}   # fallback: RSP (USD)
+  - {ticker: "XMME.DE", name: "Xtrackers MSCI EM (acc)",        ccy: "EUR"}   # fallback: IEMG (USD)
+  - {ticker: "SXRT.DE", name: "iShares Core Euro Stoxx 50",     ccy: "EUR"}   # fallback: FEZ (USD)
+  - {ticker: "VWCE.DE", name: "Vanguard FTSE All-World (acc)",  ccy: "EUR"}   # fallback: VT (USD)
+  - {ticker: "ILF",     name: "iShares Latin America 40"}                     # USD
+  # Highest-AUM US-listed ETFs (USD)
+  - {ticker: "SPY", name: "SPDR S&P 500"}
+  - {ticker: "QQQ", name: "Invesco QQQ (Nasdaq 100)"}
+  - {ticker: "VTI", name: "Vanguard Total Stock Market"}
+  - {ticker: "IWM", name: "iShares Russell 2000"}
+  - {ticker: "GLD", name: "SPDR Gold Shares"}
+  - {ticker: "SLV", name: "iShares Silver Trust"}
+  - {ticker: "TLT", name: "iShares 20+ Year Treasury Bond"}
+  - {ticker: "HYG", name: "iShares iBoxx $ High Yield Corp Bond"}
+  - {ticker: "LQD", name: "iShares iBoxx $ Inv Grade Corp Bond"}
+  - {ticker: "AGG", name: "iShares Core U.S. Aggregate Bond"}
+  - {ticker: "EEM", name: "iShares MSCI Emerging Markets"}
+  - {ticker: "EFA", name: "iShares MSCI EAFE"}
+
+# Major crypto assets (role "crypto") via yfinance — surfaced as the snapshot's
+# top-level `crypto` block. Quoted in USD.
+crypto:
+  - {ticker: "BTC-USD", name: "Bitcoin",  ccy: "USD"}
+  - {ticker: "ETH-USD", name: "Ethereum", ccy: "USD"}
+  - {ticker: "SOL-USD", name: "Solana",   ccy: "USD"}
+  - {ticker: "XRP-USD", name: "XRP",      ccy: "USD"}
+  - {ticker: "BNB-USD", name: "BNB",      ccy: "USD"}
+
+# EUR crosses (role "fx"; never rendered). Each ticker EUR{CUR}=X quotes units of
+# CUR per 1 EUR — used to convert every price item's `last` into a EUR value.
+fx_eur:
+  - "EURUSD=X"
+  - "EURGBP=X"
+  - "EURJPY=X"
+  - "EURHKD=X"
+  - "EURCNY=X"
+  - "EURKRW=X"
 
 sectors:
   oil_gas:
     label: "Oil & Gas"
-    etfs:  [XLE, XOP, OIH]
-    names: [XOM, CVX, COP, SLB]
+    etfs:
+      - {ticker: "XLE",     name: "Energy Select Sector SPDR"}
+      - {ticker: "XOP",     name: "SPDR S&P Oil & Gas E&P"}
+      - {ticker: "OIH",     name: "VanEck Oil Services"}
+      - {ticker: "EXH1.DE", name: "iShares STOXX Europe 600 Oil & Gas", ccy: "EUR"}
+    names:
+      - {ticker: "XOM",    name: "Exxon Mobil"}
+      - {ticker: "CVX",    name: "Chevron"}
+      - {ticker: "COP",    name: "ConocoPhillips"}
+      - {ticker: "SLB",    name: "SLB"}
+      - {ticker: "E",      name: "Eni"}
+      - {ticker: "EQNR",   name: "Equinor"}
+      - {ticker: "SPM.MI", name: "Saipem", ccy: "EUR"}
   defense:
     label: "Defense & Aerospace"
-    etfs:  [ITA, XAR, PPA]
-    names: [LMT, RTX, NOC, GD]
+    etfs:
+      - {ticker: "ITA",     name: "iShares U.S. Aerospace & Defense"}
+      - {ticker: "XAR",     name: "SPDR S&P Aerospace & Defense"}
+      - {ticker: "PPA",     name: "Invesco Aerospace & Defense"}
+      - {ticker: "DFEN.DE", name: "VanEck Defense",              ccy: "EUR"}
+      - {ticker: "NATO.L",  name: "HANetf Future of Defence"}
+    names:
+      - {ticker: "LMT",    name: "Lockheed Martin"}
+      - {ticker: "RTX",    name: "RTX"}
+      - {ticker: "NOC",    name: "Northrop Grumman"}
+      - {ticker: "GD",     name: "General Dynamics"}
+      - {ticker: "LDO.MI", name: "Leonardo",     ccy: "EUR"}
+      - {ticker: "RHM.DE", name: "Rheinmetall",  ccy: "EUR"}
   staples:
     label: "Consumer Staples"
-    etfs:  [XLP, VDC]
-    names: [PG, KO, PEP, COST]
+    etfs:
+      - {ticker: "XLP",     name: "Consumer Staples Select Sector SPDR"}
+      - {ticker: "VDC",     name: "Vanguard Consumer Staples"}
+      - {ticker: "EXH9.DE", name: "iShares STOXX Europe 600 Food & Beverage",  ccy: "EUR"}
+      - {ticker: "XDWS.DE", name: "Xtrackers MSCI World Consumer Staples",     ccy: "EUR"}
+    names:
+      - {ticker: "PG",   name: "Procter & Gamble"}
+      - {ticker: "KO",   name: "Coca-Cola"}
+      - {ticker: "PEP",  name: "PepsiCo"}
+      - {ticker: "COST", name: "Costco"}
   software:
     label: "Tech Software"
-    etfs:  [IGV, WCLD]
-    names: [MSFT, CRM, ORCL, NOW]
+    etfs:
+      - {ticker: "IGV",     name: "iShares Expanded Tech-Software"}
+      - {ticker: "WCLD",    name: "WisdomTree Cloud Computing"}
+      - {ticker: "XDWT.DE", name: "Xtrackers MSCI World Information Technology", ccy: "EUR"}
+      - {ticker: "EXV3.DE", name: "iShares STOXX Europe 600 Technology",         ccy: "EUR"}
+    names:
+      - {ticker: "MSFT", name: "Microsoft"}
+      - {ticker: "CRM",  name: "Salesforce"}
+      - {ticker: "ORCL", name: "Oracle"}
+      - {ticker: "NOW",  name: "ServiceNow"}
   semis:
     label: "Tech Hardware / Semis"
-    etfs:  [SMH, SOXX]
-    names: [NVDA, AMD, TSM, AVGO, ASML]
+    etfs:
+      - {ticker: "SMH",     name: "VanEck Semiconductor"}
+      - {ticker: "SOXX",    name: "iShares Semiconductor"}
+      - {ticker: "VVSM.DE", name: "VanEck Semiconductor UCITS", ccy: "EUR"}
+    names:
+      - {ticker: "AAPL",   name: "Apple"}
+      - {ticker: "NVDA",   name: "Nvidia"}
+      - {ticker: "AMD",    name: "AMD"}
+      - {ticker: "TSM",    name: "TSMC"}
+      - {ticker: "AVGO",   name: "Broadcom"}
+      - {ticker: "ASML",   name: "ASML"}
+      - {ticker: "MU",     name: "Micron"}
+      - {ticker: "IFX.DE", name: "Infineon", ccy: "EUR"}
+      - {ticker: "DELL",   name: "Dell"}
   industrials:
     label: "Infrastructure & Industrials"
-    etfs:  [XLI, PAVE, IFRA]
-    names: [CAT, DE, HON, GE, UNP]
+    etfs:
+      - {ticker: "XLI",     name: "Industrial Select Sector SPDR"}
+      - {ticker: "PAVE",    name: "Global X U.S. Infrastructure Development"}
+      - {ticker: "IFRA",    name: "iShares U.S. Infrastructure"}
+      - {ticker: "EXH4.DE", name: "iShares STOXX Europe 600 Industrial Goods & Services", ccy: "EUR"}
+    names:
+      - {ticker: "CAT",    name: "Caterpillar"}
+      - {ticker: "DE",     name: "Deere"}
+      - {ticker: "HON",    name: "Honeywell"}
+      - {ticker: "GE",     name: "GE Aerospace"}
+      - {ticker: "UNP",    name: "Union Pacific"}
+      - {ticker: "PRY.MI", name: "Prysmian", ccy: "EUR"}
+  internet:
+    label: "Internet & Platforms"
+    etfs:
+      - {ticker: "KWEB",   name: "KraneShares CSI China Internet"}
+      - {ticker: "FDN",    name: "First Trust Dow Jones Internet"}
+      - {ticker: "KWEB.L", name: "KraneShares CSI China Internet UCITS"}
+    names:
+      - {ticker: "TCEHY", name: "Tencent"}
+      - {ticker: "BABA",  name: "Alibaba"}
+  financials:
+    label: "Banks & Financials"
+    etfs:
+      - {ticker: "XLF",     name: "Financial Select Sector SPDR"}
+      - {ticker: "EUFN",    name: "iShares MSCI Europe Financials"}
+      - {ticker: "EXX1.DE", name: "iShares STOXX Europe 600 Banks", ccy: "EUR"}
+    names:
+      - {ticker: "UCG.MI", name: "UniCredit", ccy: "EUR"}
+      - {ticker: "DB",     name: "Deutsche Bank"}
+  healthcare:
+    label: "Healthcare & Pharma"
+    etfs:
+      - {ticker: "XLV",     name: "Health Care Select Sector SPDR"}
+      - {ticker: "IHE",     name: "iShares U.S. Pharmaceuticals"}
+      - {ticker: "EXV4.DE", name: "iShares STOXX Europe 600 Health Care",   ccy: "EUR"}
+      - {ticker: "XDWH.DE", name: "Xtrackers MSCI World Health Care",       ccy: "EUR"}
+    names:
+      - {ticker: "SNY", name: "Sanofi"}
+      - {ticker: "JNJ", name: "Johnson & Johnson"}
+  materials:
+    label: "Materials & Mining"
+    etfs:
+      - {ticker: "XME",     name: "SPDR S&P Metals & Mining"}
+      - {ticker: "GDX",     name: "VanEck Gold Miners"}
+      - {ticker: "XLB",     name: "Materials Select Sector SPDR"}
+      - {ticker: "EXV6.DE", name: "iShares STOXX Europe 600 Basic Resources", ccy: "EUR"}
+    names:
+      - {ticker: "GLEN.L", name: "Glencore", ccy: "GBP"}
+      - {ticker: "BHP",    name: "BHP"}
+      - {ticker: "AEM",    name: "Agnico Eagle Mines"}
+  utilities:
+    label: "Utilities & Power"
+    etfs:
+      - {ticker: "XLU",     name: "Utilities Select Sector SPDR"}
+      - {ticker: "JXI",     name: "iShares Global Utilities"}
+      - {ticker: "EXV5.DE", name: "iShares STOXX Europe 600 Utilities",  ccy: "EUR"}
+      - {ticker: "XDWU.DE", name: "Xtrackers MSCI World Utilities",      ccy: "EUR"}
+    names:
+      - {ticker: "EOAN.DE", name: "E.ON",        ccy: "EUR"}
+      - {ticker: "ELI.BR",  name: "Elia Group",  ccy: "EUR"}
 
 # US Treasury Daily Par Yield Curve maturities (public domain; attribution required).
 # `column` is the header used in the Treasury daily CSV feed. `series_id` is our
-# internal id persisted to raw_macro (source = "UST"). International sovereign
-# yields are deferred to a later phase (primary sources only).
+# internal id persisted to raw_macro (source = "UST").
 treasury_maturities:
   - {series_id: "UST2Y",  name: "US 2Y Treasury Par Yield",  column: "2 Yr"}
   - {series_id: "UST5Y",  name: "US 5Y Treasury Par Yield",  column: "5 Yr"}
@@ -60,6 +240,14 @@ treasury_maturities:
 nyfed_rates:
   - {series_id: "EFFR", name: "Effective Federal Funds Rate",       group: "unsecured", rate: "effr"}
   - {series_id: "SOFR", name: "Secured Overnight Financing Rate",   group: "secured",   rate: "sofr"}
+
+# BIS central-bank policy rates (WS_CBPOL; source = "BIS"). One free feed covers
+# ECB/BoE/BoJ/PBoC. `area` is the BIS REF_AREA code; `series_id`/`name` are ours.
+cb_policy_rates:
+  - {series_id: "ECBDFR",    name: "ECB Policy Rate (DFR)",     area: "XM"}
+  - {series_id: "BOEBR",     name: "BoE Bank Rate",             area: "GB"}
+  - {series_id: "BOJPR",     name: "BoJ Policy Rate",           area: "JP"}
+  - {series_id: "PBOCLPR1Y", name: "PBoC Loan Prime Rate 1Y",   area: "CN"}
 
 # GDELT DOC 2.0 free news/geopolitics queries
 gdelt_queries:

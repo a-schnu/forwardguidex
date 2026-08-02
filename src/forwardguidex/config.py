@@ -70,15 +70,36 @@ def load_sources() -> dict:
         return yaml.safe_load(fh)
 
 
+def normalize_entry(entry: str | dict) -> dict:
+    """Normalize a universe entry to ``{ticker, name, ccy}``.
+
+    Entries may be a bare ticker string (``"NVDA"``) or a mapping
+    (``{ticker, name, ccy}``). ``ccy`` defaults to ``"USD"`` and ``name`` to
+    ``None`` — currencies are controlled by our static config, never yfinance.
+    """
+    if isinstance(entry, str):
+        return {"ticker": entry, "name": None, "ccy": "USD"}
+    return {
+        "ticker": entry["ticker"],
+        "name": entry.get("name"),
+        "ccy": entry.get("ccy", "USD"),
+    }
+
+
 def all_price_tickers(universe: dict | None = None) -> list[str]:
     """Flat, de-duplicated list of every ticker we pull prices for."""
     u = universe or load_universe()
-    tickers: list[str] = [x["ticker"] for x in u.get("indexes", [])]
-    tickers += [x["ticker"] for x in u.get("futures", [])]
+    entries: list[str | dict] = []
+    entries += u.get("indexes", [])
+    entries += u.get("futures", [])
+    entries += u.get("etfs", [])
+    entries += u.get("crypto", [])
+    entries += u.get("fx_eur", [])
     for sec in u.get("sectors", {}).values():
-        tickers += sec.get("etfs", []) + sec.get("names", [])
+        entries += sec.get("etfs", []) + sec.get("names", [])
     seen, out = set(), []
-    for t in tickers:
+    for e in entries:
+        t = normalize_entry(e)["ticker"]
         if t not in seen:
             seen.add(t)
             out.append(t)
@@ -86,20 +107,29 @@ def all_price_tickers(universe: dict | None = None) -> list[str]:
 
 
 def ticker_dimension(universe: dict | None = None) -> list[dict]:
-    """Rows for the dim_ticker table: ticker -> role + sector."""
+    """Rows for the dim_ticker table: ticker -> name + ccy + role + sector."""
     u = universe or load_universe()
     rows: list[dict] = []
+
+    def _row(entry, role, sector_key=None, sector_label=None):
+        e = normalize_entry(entry)
+        return {"ticker": e["ticker"], "name": e["name"], "ccy": e["ccy"],
+                "role": role, "sector_key": sector_key, "sector_label": sector_label}
+
     for x in u.get("indexes", []):
-        rows.append({"ticker": x["ticker"], "name": x.get("name"), "role": "index",
-                     "sector_key": None, "sector_label": None})
+        rows.append(_row(x, "index"))
     for x in u.get("futures", []):
-        rows.append({"ticker": x["ticker"], "name": x.get("name"), "role": "future",
-                     "sector_key": None, "sector_label": None})
+        rows.append(_row(x, "future"))
+    for x in u.get("etfs", []):
+        rows.append(_row(x, "fund"))
+    for x in u.get("crypto", []):
+        rows.append(_row(x, "crypto"))
+    for x in u.get("fx_eur", []):
+        rows.append(_row(x, "fx"))  # role "fx": conversion source, never rendered
     for key, sec in u.get("sectors", {}).items():
+        label = sec.get("label")
         for t in sec.get("etfs", []):
-            rows.append({"ticker": t, "name": None, "role": "etf",
-                         "sector_key": key, "sector_label": sec.get("label")})
+            rows.append(_row(t, "etf", key, label))
         for t in sec.get("names", []):
-            rows.append({"ticker": t, "name": None, "role": "name",
-                         "sector_key": key, "sector_label": sec.get("label")})
+            rows.append(_row(t, "name", key, label))
     return rows

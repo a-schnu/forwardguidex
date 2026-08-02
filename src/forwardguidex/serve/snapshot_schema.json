@@ -9,6 +9,8 @@
     "meta": { "$ref": "#/$defs/meta" },
     "indices": { "type": "array", "items": { "$ref": "#/$defs/priceItem" } },
     "futures": { "type": "array", "items": { "$ref": "#/$defs/priceItem" } },
+    "etfs": { "type": "array", "items": { "$ref": "#/$defs/priceItem" } },
+    "crypto": { "type": "array", "items": { "$ref": "#/$defs/priceItem" } },
     "sectors": { "type": "array", "items": { "$ref": "#/$defs/sector" } },
     "rates": { "type": "array", "items": { "$ref": "#/$defs/rateItem" } },
     "movers": { "$ref": "#/$defs/movers" },
@@ -16,7 +18,7 @@
     "brief": { "$ref": "#/$defs/brief" }
   },
   "$defs": {
-    "currency": { "type": "string", "enum": ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "HKD"] },
+    "currency": { "type": "string", "enum": ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "HKD", "KRW", "CNY"] },
     "quality": { "type": "string", "enum": ["OK", "PARTIAL", "DEGRADED"] },
     "ret": { "type": ["number", "null"], "minimum": -100, "maximum": 100 },
     "tsOrNull": { "type": ["string", "null"], "maxLength": 40 },
@@ -28,14 +30,16 @@
         "ticker": { "type": "string", "minLength": 1, "maxLength": 24 },
         "name": { "type": ["string", "null"], "maxLength": 120 },
         "last": { "type": ["number", "null"], "minimum": 0, "maximum": 100000000 },
+        "eur": { "type": ["number", "null"], "minimum": 0, "maximum": 100000000 },
         "currency": { "$ref": "#/$defs/currency" },
         "ret_1d": { "$ref": "#/$defs/ret" },
         "ret_5d": { "$ref": "#/$defs/ret" },
         "as_of": { "$ref": "#/$defs/tsOrNull" },
         "source": { "type": "string", "minLength": 1, "maxLength": 24 },
         "quality": { "$ref": "#/$defs/quality" },
-        "role": { "type": "string", "enum": ["etf", "constituent", "index", "future", "name"] },
-        "sector": { "type": ["string", "null"], "maxLength": 80 }
+        "role": { "type": "string", "enum": ["etf", "constituent", "index", "future", "name", "fund", "crypto"] },
+        "sector": { "type": ["string", "null"], "maxLength": 80 },
+        "spark": { "type": "array", "items": { "type": ["number", "null"] }, "maxItems": 60 }
       }
     },
     "rateItem": {
@@ -100,7 +104,8 @@
       "additionalProperties": false,
       "properties": {
         "us_treasury": { "type": "string", "maxLength": 2000 },
-        "ny_fed": { "type": "string", "maxLength": 4000 }
+        "ny_fed": { "type": "string", "maxLength": 4000 },
+        "bis": { "type": "string", "maxLength": 2000 }
       }
     },
     "meta": {
