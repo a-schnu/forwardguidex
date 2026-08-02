@@ -41,9 +41,17 @@ TIMEOUT_S = 30
 _SNAP_NAME_RE = re.compile(r"^snapshot\.[0-9a-f]{64}\.json$")
 
 
+class SmokeFailure(Exception):
+    """Probe assertion failure. Raised by ``_fail``; caught either by a retry
+    helper (silent) or by ``main`` (which prints ``::error::`` once and exits).
+    Using an exception instead of ``sys.exit(::error::...)`` means retried
+    probes don't spam the CI log with fake ``::error::`` lines that GitHub
+    Actions counts as real errors.
+    """
+
+
 def _fail(msg: str) -> "NoReturn":  # type: ignore[valid-type]
-    print(f"::error::{msg}", flush=True)
-    sys.exit(1)
+    raise SmokeFailure(msg)
 
 
 def _pass(msg: str) -> None:
@@ -72,6 +80,45 @@ def _request(url: str, *, method: str = "GET", headers: dict | None = None,
 
 def _basic(pw: str) -> str:
     return "Basic " + base64.b64encode(f"ci:{pw}".encode()).decode()
+
+
+def _wait_until_deployed(host: str, label: str,
+                         *, max_wait_s: float = 60.0,
+                         initial_delay_s: float = 3.0) -> None:
+    """Poll ``host`` until the deployment routes are propagated (or fail).
+
+    ``wrangler pages deploy`` returns as soon as the Cloudflare API accepts the
+    upload, but the unique preview URL (e.g. ``https://<hash>.pages.dev``) can
+    take a few seconds to route through the edge — during that window the URL
+    may return ``404`` even though the deploy is healthy. Poll for a status
+    that means "routing is live" (``401`` from the middleware, or ``200`` /
+    ``503``, or an authenticated ``200``) rather than the transient ``404``.
+
+    On timeout we do NOT fail: the caller runs its real assertions next and
+    will surface a genuine failure with better diagnostics than "still 404".
+    """
+    if initial_delay_s > 0:
+        time.sleep(initial_delay_s)
+    deadline = time.monotonic() + max_wait_s
+    attempt = 0
+    while True:
+        attempt += 1
+        status, hdrs, _ = _request(_mark_bust(host + "/", f"warmup{attempt}"))
+        # 401 (gate enforced), 200 (open — a bug we'll catch below), 503
+        # (gate misconfigured) all prove the request reached our Function.
+        if status in (200, 401, 503):
+            if attempt > 1:
+                print(f"OK: {label}: deployment routing propagated after {attempt} attempts.", flush=True)
+            return
+        if time.monotonic() >= deadline:
+            print(
+                f"::warning::{label}: deployment routing did not stabilise within "
+                f"{max_wait_s:.0f}s (last status={status}, err={hdrs.get('__err__') if hdrs else None}); "
+                f"continuing with the real probes so a genuine failure surfaces.",
+                flush=True,
+            )
+            return
+        time.sleep(2.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -157,6 +204,35 @@ def probe_live_snapshot(host: str, pw: str, *, expected_sha: str,
     _pass(f"{label}: live snapshot verified (SHA-256, schema, quality={meta.get('quality')}).")
 
 
+def _probe_live_snapshot_retrying(host: str, pw: str, *, expected_sha: str,
+                                  expected_name: str, label: str,
+                                  max_wait_s: float = 90.0) -> None:
+    """Retry ``probe_live_snapshot`` until success or timeout.
+
+    Used for the stable alias where the promotion / cache may lag the unique
+    URL by up to ~1 min. A single-shot check would flag propagation as a
+    smoke failure and rollback needlessly. Intermediate failures are logged
+    as ``::warning::`` (not ``::error::``); the final failure re-raises so
+    ``main`` prints one authoritative ``::error::``.
+    """
+    deadline = time.monotonic() + max_wait_s
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            probe_live_snapshot(host, pw,
+                                expected_sha=expected_sha,
+                                expected_name=expected_name,
+                                label=f"{label} attempt {attempt}")
+            return
+        except SmokeFailure as exc:
+            if time.monotonic() >= deadline:
+                raise
+            print(f"::warning::{label}: probe not yet stable ({exc}); retrying in 5s...",
+                  flush=True)
+            time.sleep(5.0)
+
+
 def probe_chat_api(host: str, pw: str, label: str) -> None:
     """Contract probes for /api/chat (fails closed on unauth / method / origin / body)."""
     endpoint = _mark_bust(host + "/api/chat", "chat")
@@ -210,7 +286,7 @@ def probe_chat_api(host: str, pw: str, label: str) -> None:
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
-def main() -> int:
+def _main_body() -> None:
     try:
         app_host = os.environ["APP_HOST"].rstrip("/")
         unique = (os.environ.get("UNIQUE_DEPLOY_URL") or "").strip().rstrip("/")
@@ -234,6 +310,10 @@ def main() -> int:
     # PRIMARY: unique deployment URL — this is the exact deploy under test.
     if unique:
         primary_label = f"unique[{unique}]"
+        # Cloudflare Pages returns 404 for a few seconds on the unique URL
+        # immediately after `wrangler pages deploy` completes, while edge
+        # routing propagates. Warm up before asserting.
+        _wait_until_deployed(unique, primary_label)
         probe_auth_gate(unique, pw, primary_label)
         probe_live_snapshot(unique, pw,
                             expected_sha=expected_sha,
@@ -246,15 +326,28 @@ def main() -> int:
     # SECONDARY: stable alias — must reflect the same approved artifact.
     # A persistent mismatch means the promotion silently didn't happen; the
     # brief mandates the workflow must not report full success in that case.
+    # Alias propagation can lag the unique URL by up to a minute; the alias
+    # can also serve a stale artifact briefly, so we retry the SHA / snapshot-
+    # name check for a bounded window before failing.
     if app_host and app_host != unique:
         alias_label = f"alias[{app_host}]"
+        _wait_until_deployed(app_host, alias_label, max_wait_s=90.0)
         probe_auth_gate(app_host, pw, alias_label)
-        probe_live_snapshot(app_host, pw,
-                            expected_sha=expected_sha,
-                            expected_name=expected_name,
-                            label=alias_label)
+        _probe_live_snapshot_retrying(
+            app_host, pw,
+            expected_sha=expected_sha, expected_name=expected_name,
+            label=alias_label, max_wait_s=90.0,
+        )
 
     print("SMOKE PASSED (unique deploy: auth gate, live bytes, /api/chat all verified).", flush=True)
+
+
+def main() -> int:
+    try:
+        _main_body()
+    except SmokeFailure as exc:
+        print(f"::error::{exc}", flush=True)
+        return 1
     return 0
 
 

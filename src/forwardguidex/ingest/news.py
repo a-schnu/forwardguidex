@@ -23,9 +23,16 @@ GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 
 # GDELT throttles aggressively (documented ~10 QPM soft ceiling). We serialize
 # our topic queries with a short spacing to avoid self-inflicted 429 bursts.
+#
+# Empirically (CI preview 30767576487): GDELT's TLS handshake alone can take
+# 5-10 s from GitHub Actions runners, so we give it plenty of headroom on both
+# connect and read. ``GDELT_ATTEMPTS = 3`` keeps the worst-case per-query time
+# bounded (~3 * (25 s read + backoff up to 30 s) ~= 3 min budget) while still
+# absorbing a single 429 or transient blip.
 GDELT_MIN_SPACING_SEC = 1.5
-GDELT_ATTEMPTS = 4
-GDELT_READ_TIMEOUT = 20.0
+GDELT_ATTEMPTS = 3
+GDELT_CONNECT_TIMEOUT = 20.0
+GDELT_READ_TIMEOUT = 25.0
 
 _log = logging.getLogger(__name__)
 
@@ -118,6 +125,7 @@ def _fetch_query(
         GDELT_URL,
         params=params,
         attempts=GDELT_ATTEMPTS,
+        connect_timeout=GDELT_CONNECT_TIMEOUT,
         read_timeout=GDELT_READ_TIMEOUT,
         min_spacing=GDELT_MIN_SPACING_SEC,
     )

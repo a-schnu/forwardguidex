@@ -32,12 +32,18 @@ USER_AGENT = "ForwardGuidex/0.1 (+https://github.com/a-schnu/forwardguidex)"
 
 # Bounded, conservative default policy. Individual providers can override any of
 # these via keyword args on ``fetch_json`` (see ``ingest/news.py`` for GDELT).
-DEFAULT_ATTEMPTS = 4
-DEFAULT_CONNECT_TIMEOUT = 5.0
-DEFAULT_READ_TIMEOUT = 20.0
+#
+# Note on ``DEFAULT_CONNECT_TIMEOUT``: GDELT's TLS handshake regularly takes 5-10 s
+# from GitHub Actions runners; a 5 s connect timeout was too aggressive and caused
+# every query to fail before the first HTTP response byte was received. urllib3 v2
+# reports that as ``Read timed out. (read timeout=<connect_timeout>)``, which was
+# doubly confusing. Keep this generous.
+DEFAULT_ATTEMPTS = 3
+DEFAULT_CONNECT_TIMEOUT = 20.0
+DEFAULT_READ_TIMEOUT = 30.0
 DEFAULT_BACKOFF_BASE = 1.0
 DEFAULT_BACKOFF_CAP = 30.0
-DEFAULT_MAX_ELAPSED = 90.0
+DEFAULT_MAX_ELAPSED = 180.0
 DEFAULT_RETRY_AFTER_CAP = 30.0
 
 # HTTP statuses we consider transient (worth a bounded retry).
