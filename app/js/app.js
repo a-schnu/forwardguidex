@@ -852,6 +852,97 @@ function renderMovers(snapshot) {
   l.setAttribute('data-viz', '');
 }
 
+/* ---------- central-bank decisions (cb_events) ---------- */
+
+function renderCbEvents(snapshot) {
+  const host = document.getElementById('cbEventsGrid');
+  const section = document.getElementById('cbevents');
+  if (!host) return;
+  host.textContent = '';
+  const events = Array.isArray(snapshot.cb_events) ? snapshot.cb_events : [];
+  if (!events.length) { if (section) section.hidden = true; return; }
+  if (section) section.hidden = false;
+
+  events.forEach((ev) => {
+    const card = el('div', 'cbev glass');
+    card.appendChild(el('div', 'cbev-bank', ev.bank));
+
+    const hasRate = typeof ev.rate === 'number' && Number.isFinite(ev.rate);
+    const rateWrap = el('div', 'cbev-rate');
+    const rateVal = el('span', 'cbev-rate-val', hasRate ? fmtNum(ev.rate) + '%' : '—');
+    if (hasRate) markCountUp(rateVal, ev.rate, 'pctval');
+    rateWrap.appendChild(rateVal);
+    card.appendChild(rateWrap);
+
+    const bp = Math.abs(Number.isFinite(ev.change_bp) ? ev.change_bp : 0);
+    let chipText;
+    if (ev.direction === 'hike') chipText = 'Rialzo +' + bp + 'bp';
+    else if (ev.direction === 'cut') chipText = 'Taglio −' + bp + 'bp';
+    else chipText = 'Invariato';
+    card.appendChild(el('div', 'cbev-chip ' + signClass(ev.change_bp), chipText));
+
+    if (ev.as_of) card.appendChild(el('div', 'cbev-asof muted', 'dal ' + fmtDate(ev.as_of)));
+
+    host.appendChild(card);
+  });
+}
+
+/* ---------- upcoming earnings ---------- */
+
+function renderEarnings(snapshot) {
+  const host = document.getElementById('earningsList');
+  const section = document.getElementById('earnings');
+  if (!host) return;
+  host.textContent = '';
+  const items = Array.isArray(snapshot.earnings) ? snapshot.earnings : [];
+  if (!items.length) { if (section) section.hidden = true; return; }
+  if (section) section.hidden = false;
+
+  items.forEach((it) => {
+    const row = el('div', 'earn-row');
+    row.appendChild(el('span', 'earn-date', fmtDate(it.date)));
+    row.appendChild(el('span', 'earn-tk', it.ticker));
+    row.appendChild(el('span', 'earn-nm', it.name));
+    row.appendChild(el('span', 'earn-sec muted', it.sector || ''));
+    const eps = (typeof it.eps_estimate === 'number' && Number.isFinite(it.eps_estimate))
+      ? fmtNum(it.eps_estimate) : '—';
+    row.appendChild(el('span', 'earn-eps', 'EPS stim. ' + eps));
+    host.appendChild(row);
+  });
+}
+
+/* ---------- triggers / catalysts ---------- */
+
+function renderTriggers(snapshot) {
+  const host = document.getElementById('triggersList');
+  const section = document.getElementById('triggers');
+  if (!host) return;
+  host.textContent = '';
+  const items = Array.isArray(snapshot.triggers) ? snapshot.triggers : [];
+  if (!items.length) { if (section) section.hidden = true; return; }
+  if (section) section.hidden = false;
+
+  const SOURCE_LABEL = { federal_register: 'Federal Register', sec_edgar: 'SEC EDGAR' };
+
+  items.forEach((it) => {
+    const row = el('div', 'trig-row glass');
+    const head = el('div', 'trig-head');
+    const isSec = it.kind === 'sec_8k';
+    head.appendChild(el('span', 'trig-badge ' + (isSec ? 'sec' : 'eo'), isSec ? '8-K' : 'EO'));
+    head.appendChild(el('span', 'trig-date muted', fmtDate(it.date)));
+    row.appendChild(head);
+
+    const titleWrap = el('div', 'trig-title');
+    titleWrap.appendChild(makeSafeLink(it.title, it.url));
+    row.appendChild(titleWrap);
+
+    const metaText = it.ticker || SOURCE_LABEL[it.source] || it.source || '';
+    if (metaText) row.appendChild(el('div', 'trig-meta muted', metaText));
+
+    host.appendChild(row);
+  });
+}
+
 /* ---------- headlines ---------- */
 
 function renderHeadlines(snapshot) {
@@ -1031,6 +1122,9 @@ async function main() {
     renderSectors(snapshot);
     renderRates(snapshot);
     renderMovers(snapshot);
+    renderCbEvents(snapshot);
+    renderEarnings(snapshot);
+    renderTriggers(snapshot);
     renderHeadlines(snapshot);
     renderBrief(snapshot);
     renderFooter(snapshot.meta);

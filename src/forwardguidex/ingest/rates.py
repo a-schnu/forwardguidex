@@ -152,7 +152,9 @@ def ingest_rates(con) -> int:
     frames = [
         _treasury_rows(u.get("treasury_maturities", [])),
         _nyfed_rows(u.get("nyfed_rates", [])),
-        _bis_rows(u.get("cb_policy_rates", [])),
+        # ~400 daily observations of history so transform/events.cb_events can find
+        # each central bank's most recent policy-rate change (decisions view).
+        _bis_rows(u.get("cb_policy_rates", []), n=400),
     ]
     frames = [f for f in frames if f is not None and not f.empty]
     if not frames:

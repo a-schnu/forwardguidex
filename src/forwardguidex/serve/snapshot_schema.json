@@ -15,6 +15,9 @@
     "rates": { "type": "array", "items": { "$ref": "#/$defs/rateItem" } },
     "movers": { "$ref": "#/$defs/movers" },
     "headlines": { "type": "array", "items": { "$ref": "#/$defs/headline" } },
+    "cb_events": { "type": "array", "maxItems": 12, "items": { "$ref": "#/$defs/cbEvent" } },
+    "earnings": { "type": "array", "maxItems": 40, "items": { "$ref": "#/$defs/earningsItem" } },
+    "triggers": { "type": "array", "maxItems": 24, "items": { "$ref": "#/$defs/trigger" } },
     "brief": { "$ref": "#/$defs/brief" }
   },
   "$defs": {
@@ -99,13 +102,56 @@
         "created_at": { "$ref": "#/$defs/tsOrNull" }
       }
     },
+    "cbEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bank", "series_id", "direction", "source"],
+      "properties": {
+        "bank": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "series_id": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "rate": { "type": ["number", "null"], "minimum": -10, "maximum": 40 },
+        "change_bp": { "type": ["number", "null"], "minimum": -2000, "maximum": 2000 },
+        "direction": { "type": "string", "enum": ["hike", "cut", "hold"] },
+        "as_of": { "$ref": "#/$defs/tsOrNull" },
+        "source": { "type": "string", "minLength": 1, "maxLength": 24 }
+      }
+    },
+    "earningsItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ticker", "date", "source"],
+      "properties": {
+        "ticker": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "name": { "type": ["string", "null"], "maxLength": 120 },
+        "date": { "type": "string", "maxLength": 40 },
+        "eps_estimate": { "type": ["number", "null"], "minimum": -100000, "maximum": 100000 },
+        "sector": { "type": ["string", "null"], "maxLength": 80 },
+        "source": { "type": "string", "minLength": 1, "maxLength": 24 }
+      }
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "title", "date", "url", "source"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["executive_order", "sec_8k"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "ticker": { "type": ["string", "null"], "maxLength": 24 },
+        "date": { "type": "string", "maxLength": 40 },
+        "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+        "topic": { "type": ["string", "null"], "maxLength": 120 },
+        "source": { "type": "string", "minLength": 1, "maxLength": 24 }
+      }
+    },
     "attribution": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "us_treasury": { "type": "string", "maxLength": 2000 },
         "ny_fed": { "type": "string", "maxLength": 4000 },
-        "bis": { "type": "string", "maxLength": 2000 }
+        "bis": { "type": "string", "maxLength": 2000 },
+        "federal_register": { "type": "string", "maxLength": 2000 },
+        "sec_edgar": { "type": "string", "maxLength": 2000 }
       }
     },
     "meta": {

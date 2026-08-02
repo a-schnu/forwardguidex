@@ -1,0 +1,6 @@
+Source: U.S. Securities and Exchange Commission — EDGAR (sec.gov).
+
+Company filing metadata (e.g. Form 8-K material-event filings) is public information
+obtained from the SEC EDGAR system via its free API, accessed with a descriptive
+User-Agent per the SEC fair-access policy. ForwardGuidex reproduces filing titles,
+dates and links for informational purposes; the SEC does not endorse ForwardGuidex.

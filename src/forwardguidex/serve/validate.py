@@ -98,6 +98,10 @@ def _https_errors(payload: dict) -> list[str]:
         url = h.get("url") or ""
         if not url.startswith("https://"):
             errs.append(f"headlines[{i}].url: not https ({url[:40]!r})")
+    for i, t in enumerate(payload.get("triggers", []) or []):
+        url = t.get("url") or ""
+        if not url.startswith("https://"):
+            errs.append(f"triggers[{i}].url: not https ({url[:40]!r})")
     md = (payload.get("brief", {}) or {}).get("markdown", "") or ""
     for m in re.findall(r"http://[^\s)\"'>]+", md):
         errs.append(f"brief.markdown: insecure http:// link {m[:60]!r}")

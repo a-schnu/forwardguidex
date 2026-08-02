@@ -1,7 +1,7 @@
 {
   "snapshot": "snapshot.demo.json",
-  "artifact_sha256": "14efd8fbce022833aa2abbf270a75e37cb82083606669ef4cdb11b4780cc2901",
-  "content_hash": "sha256:103ce45a83fd8d44176fe67079f49bc02e752518d4e9567c68b1225f20b857e2",
+  "artifact_sha256": "ef865f6d9c9bb1686d115a3b85d1cc259ea1cb7b3ffa90066d0350eb041581e2",
+  "content_hash": "sha256:0fde189aad383a2b0e530084d04acfe4dfe3f0e0f91c289ea063d70f759e62b5",
   "generated_at": "2026-08-01T08:00:00+00:00",
   "schema_version": 1
 }
