@@ -97,6 +97,26 @@ section.block.first{padding-top:34px}
 .tab-desc{font-size:13px;margin:14px 0 22px;min-height:1.2em}
 @media(max-width:560px){.ov-tab{font-size:13px;padding:8px 5px 10px}.tab-desc{margin:12px 0 18px}}
 
+/* Overview: heading + Morning Brief side by side, tabs full-width below */
+.ov-top{display:grid;grid-template-columns:1.1fr .9fr;gap:28px;align-items:start;margin-bottom:22px}
+.ov-top .head{margin-bottom:0}
+@media(max-width:880px){.ov-top{grid-template-columns:1fr;gap:20px}}
+
+/* Morning Brief = expandable glass card (collapsed by default) */
+.brief-card{border-radius:var(--radius);overflow:hidden;padding:0}
+.brief-toggle{width:100%;display:flex;align-items:center;justify-content:space-between;gap:16px;
+  background:transparent;border:0;cursor:pointer;padding:18px 20px;text-align:left;color:inherit;
+  font-family:var(--font);position:relative;z-index:1}
+.brief-toggle-l{display:flex;flex-direction:column;gap:5px}
+.brief-toggle .when{font-size:13px;font-weight:600}
+.brief-caret{color:var(--violet);font-size:16px;line-height:1;flex:0 0 auto;transition:transform .3s ease}
+.brief-card.open .brief-caret{transform:rotate(180deg)}
+/* collapsed: clip to a teaser height with a bottom fade; open: expand smoothly */
+.brief-card .brief-body{max-height:96px;overflow:hidden;padding:0 20px;transition:max-height .4s ease}
+.brief-card:not(.open) .brief-body::after{content:"";position:absolute;left:0;right:0;bottom:0;height:52px;
+  pointer-events:none;background:linear-gradient(to bottom,rgba(11,9,18,0),#0b0912)}
+.brief-card.open .brief-body{max-height:1600px;padding-bottom:18px}
+
 /* KPI strip */
 .kpi-groups{display:flex;flex-direction:column;gap:28px}
 .kpi-group-label{color:var(--violet-soft);font-weight:600;letter-spacing:.14em;text-transform:uppercase;
@@ -159,8 +179,10 @@ section.block.first{padding-top:34px}
 .rates-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}
 @media(max-width:960px){.rates-strip{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:560px){.rates-strip{grid-template-columns:repeat(2,1fr)}}
-/* when both Treasury/reference and central-bank rates exist, stack the two groups */
+/* when both Treasury/reference and central-bank decisions exist, stack the two groups */
 .rates-strip.rates-grouped{display:flex;flex-direction:column;gap:26px}
+/* central-bank decision cards render inside a .rates-group in the rates section */
+.rates-group .cbev-grid{margin-top:0}
 .rate{border-radius:var(--radius);padding:16px;transition:border-color .25s,box-shadow .25s,transform .25s}
 .rate:hover{border-color:var(--violet-line);box-shadow:var(--glass-hi),var(--glow-v);transform:translateY(-3px)}
 .rate-name{color:var(--muted);font-size:12px;font-weight:600;min-height:32px}

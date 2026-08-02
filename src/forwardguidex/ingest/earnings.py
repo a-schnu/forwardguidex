@@ -109,4 +109,9 @@ def ingest_earnings(con) -> int:
         return 0
     out = (pd.DataFrame(rows)
            .drop_duplicates(subset=["ticker", "earnings_date"], keep="last"))
+    # Pin column types so DuckDB creates a stable schema: an all-None eps_estimate
+    # batch would otherwise be inferred INTEGER and reject a later float insert.
+    out["ticker"] = out["ticker"].astype("string")
+    out["name"] = out["name"].astype("string")
+    out["eps_estimate"] = out["eps_estimate"].astype("Float64")
     return upsert(con, "raw_earnings", out, keys=["ticker", "earnings_date"])

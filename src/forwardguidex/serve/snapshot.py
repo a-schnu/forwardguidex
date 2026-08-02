@@ -294,17 +294,24 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
             "quality": "OK" if val is not None else "PARTIAL",
         })
 
-    # headlines
-    # Keep only https headlines (the dashboard renders only https links, and the
-    # validator rejects http URLs) — fetch extra, filter, cap at 12.
-    news_df = marts.news(con, limit=40)
+    # headlines — MACRO/FINANCIAL only. Keep only the topics whose GDELT query is
+    # flagged `macro: true` in the universe (central banks, inflation, jobs, oil,
+    # tariffs, markets, semis); geopolitical topics are excluded from the news feed
+    # (they still feed the LLM brief). Keep only https links (the dashboard renders
+    # only https and the validator rejects http). Fetch extra, filter, cap at 12.
+    macro_topics = {q.get("key") for q in config.load_universe().get("gdelt_queries", [])
+                    if q.get("macro")}
+    news_df = marts.news(con, limit=60)
     headlines = []
     for h in news_df.itertuples():
+        topic = _str(h.topic)
+        if macro_topics and topic not in macro_topics:
+            continue
         url = _str(h.url)
         if not url or not url.startswith("https://"):
             continue
         headlines.append({
-            "topic": _str(h.topic), "title": _str(h.title), "domain": _str(h.domain),
+            "topic": topic, "title": _str(h.title), "domain": _str(h.domain),
             "url": url, "seendate": _str(h.seendate),
         })
         if len(headlines) >= 12:
@@ -722,35 +729,43 @@ def demo_snapshot(now: datetime | None = None) -> dict:
              "as_of": nf, "source": "NYFED", "quality": "OK"},
             {"series_id": "SOFR", "name": "Secured Overnight Financing Rate", "value": 3.65, "chg": 0.01,
              "as_of": nf, "source": "NYFED", "quality": "OK"},
-            {"series_id": "ECBDFR", "name": "ECB Policy Rate (DFR)", "value": 2.00, "chg": 0.0,
+            {"series_id": "ECBDFR", "name": "ECB Policy Rate (DFR)", "value": 2.25, "chg": 0.0,
              "as_of": bis, "source": "BIS", "quality": "OK"},
-            {"series_id": "BOEBR", "name": "BoE Bank Rate", "value": 3.75, "chg": -0.25,
+            {"series_id": "BOEBR", "name": "BoE Bank Rate", "value": 3.75, "chg": 0.0,
              "as_of": bis, "source": "BIS", "quality": "OK"},
-            {"series_id": "BOJPR", "name": "BoJ Policy Rate", "value": 0.50, "chg": 0.0,
+            {"series_id": "BOJPR", "name": "BoJ Policy Rate", "value": 1.00, "chg": 0.0,
              "as_of": bis, "source": "BIS", "quality": "OK"},
             {"series_id": "PBOCLPR1Y", "name": "PBoC Loan Prime Rate 1Y", "value": 3.00, "chg": 0.0,
              "as_of": bis, "source": "BIS", "quality": "OK"},
         ],
         "movers": {"gainers": all_eq[:6], "losers": list(reversed(all_eq[-6:]))},
+        # Macro/financial topics only (mirrors the live news filter): central banks,
+        # inflation, oil, tariffs, semis, markets — no pure geopolitics.
         "headlines": [
-            {"topic": "oil", "title": "OPEC+ holds output steady ahead of demand review", "domain": "reuters.com",
+            {"topic": "fed", "title": "Fed officials signal patience on further rate cuts", "domain": "wsj.com",
+             "url": "https://www.wsj.com/economy", "seendate": seen},
+            {"topic": "inflazione", "title": "US core CPI eases to 2.9%, reinforcing disinflation trend", "domain": "reuters.com",
+             "url": "https://www.reuters.com/markets/us/", "seendate": seen},
+            {"topic": "petrolio", "title": "OPEC+ holds output steady ahead of demand review", "domain": "reuters.com",
              "url": "https://www.reuters.com/markets/commodities/", "seendate": seen},
-            {"topic": "defense", "title": "NATO members lift defense spending targets", "domain": "ft.com",
+            {"topic": "dazi", "title": "New tariff round on imports rattles trade-exposed sectors", "domain": "ft.com",
              "url": "https://www.ft.com/world", "seendate": seen},
             {"topic": "semis", "title": "Chip demand cools as AI capex guidance trimmed", "domain": "bloomberg.com",
              "url": "https://www.bloomberg.com/technology", "seendate": seen},
-            {"topic": "fed", "title": "Fed officials signal patience on rate cuts", "domain": "wsj.com",
-             "url": "https://www.wsj.com/economy", "seendate": seen},
+            {"topic": "mercati", "title": "Wall Street steadies as defensives lead the rotation", "domain": "bloomberg.com",
+             "url": "https://www.bloomberg.com/markets", "seendate": seen},
         ],
+        # Real values as of 2026-08-02 (derived live from BIS WS_CBPOL) so the demo
+        # mirrors production: Fed cut, BCE + BoJ hiked, BoE cut, PBoC unchanged.
         "cb_events": [
             {"bank": "Fed", "series_id": "USFED", "rate": 3.625, "change_bp": -25,
-             "direction": "cut", "as_of": "2026-06-18", "source": "BIS"},
-            {"bank": "BCE", "series_id": "ECBDFR", "rate": 2.00, "change_bp": 0,
-             "direction": "hold", "as_of": None, "source": "BIS"},
+             "direction": "cut", "as_of": "2025-12-11", "source": "BIS"},
+            {"bank": "BCE", "series_id": "ECBDFR", "rate": 2.25, "change_bp": 25,
+             "direction": "hike", "as_of": "2026-06-17", "source": "BIS"},
             {"bank": "BoE", "series_id": "BOEBR", "rate": 3.75, "change_bp": -25,
-             "direction": "cut", "as_of": "2026-06-19", "source": "BIS"},
-            {"bank": "BoJ", "series_id": "BOJPR", "rate": 0.50, "change_bp": 25,
-             "direction": "hike", "as_of": "2026-01-24", "source": "BIS"},
+             "direction": "cut", "as_of": "2025-12-18", "source": "BIS"},
+            {"bank": "BoJ", "series_id": "BOJPR", "rate": 1.00, "change_bp": 25,
+             "direction": "hike", "as_of": "2026-06-17", "source": "BIS"},
             {"bank": "PBoC", "series_id": "PBOCLPR1Y", "rate": 3.00, "change_bp": 0,
              "direction": "hold", "as_of": None, "source": "BIS"},
         ],
@@ -801,8 +816,8 @@ def demo_snapshot(now: datetime | None = None) -> dict:
             "- **Europa:** DAX +0.7%, FTSE MIB +0.8%, CAC 40 +0.3% — banche e difesa in spolvero.\n"
             "- **Asia:** Hang Seng +1.1% e Shanghai +0.9% in rialzo; Nikkei -0.5%, KOSPI -0.3% deboli.\n"
             "- **Settori:** **Difesa +2.4%** ed **Energia +1.8%** i migliori; **Semiconduttori -1.1%** il peggiore.\n"
-            "- **Tassi e banche centrali:** UST 10Y al **4.75%** (+0.07); la **BoE taglia 25pb al 3.75%**, "
-            "BCE ferma al 2.00%, BoJ 0.50%, PBoC 3.00%.\n"
+            "- **Tassi e banche centrali:** UST 10Y al **4.75%** (+0.07); Fed al **3.625%** (taglio), "
+            "**BoE 3.75%** (taglio), **BCE 2.25%** (rialzo), **BoJ 1.00%** (rialzo), PBoC ferma al 3.00%.\n"
             "- **In evidenza:** Rheinmetall +3.4% traina la difesa europea; Bitcoin **$63.120** (+1.4%).\n\n"
             "## Cosa tenere d'occhio\n"
             "**Breve termine (trading)**\n"
