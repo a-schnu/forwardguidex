@@ -1148,7 +1148,7 @@ let chatBusy = false;
 
 const CHAT_GREETING =
   'Ciao! Sono l’**Assistente AI** di ForwardGuidex. ' +
-  'Come posso esserti utile?';
+  'Come posso esserti utile oggi su mercati, indici o tassi?';
 
 /** Trim the running history to the last CHAT_MAX_TURNS entries. */
 function trimChatHistory() {
