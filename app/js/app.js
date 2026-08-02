@@ -9,6 +9,10 @@
 
 import { loadSnapshot } from './data.js';
 
+/* Loaded snapshot, stashed in main() so the AI chat widget can build its
+ * grounding context from the same in-memory data the dashboard renders. */
+let currentSnapshot = null;
+
 /* ---------- small DOM + format helpers ---------- */
 
 function el(tag, className, text) {
@@ -1125,10 +1129,247 @@ function wireCosmetics() {
   });
 }
 
+/* ---------- floating AI chat widget ---------- */
+
+/* Same sanitiser config as renderBrief — the ONLY difference is these are
+ * assistant chat replies rather than the Morning Brief. */
+const CHAT_SANITIZE = {
+  ALLOWED_TAGS: ['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'li', 'strong', 'em', 'blockquote', 'code', 'pre', 'a', 'br'],
+  ALLOWED_ATTR: ['href', 'title'],
+  ALLOW_DATA_ATTR: false,
+  ALLOW_ARIA_ATTR: false
+};
+
+// In-memory conversation (user + assistant turns), trimmed to the last ~12.
+const chatHistory = [];
+const CHAT_MAX_TURNS = 12;
+const CHAT_MAX_INPUT = 2000;
+let chatBusy = false;
+
+/** Trim the running history to the last CHAT_MAX_TURNS entries. */
+function trimChatHistory() {
+  if (chatHistory.length > CHAT_MAX_TURNS) {
+    chatHistory.splice(0, chatHistory.length - CHAT_MAX_TURNS);
+  }
+}
+
+/**
+ * Compact (<~1500 char) plain-text market summary the client sends as grounding
+ * context. Every field is guarded — arrays may be empty or missing.
+ */
+function buildMarketContext(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return '';
+  const parts = [];
+  const meta = snapshot.meta || {};
+  if (meta.data_as_of) parts.push('Dati al ' + fmtDate(meta.data_as_of) + '.');
+
+  const indices = Array.isArray(snapshot.indices) ? snapshot.indices : [];
+  if (indices.length) {
+    parts.push('Indici (1g): ' + indices.slice(0, 8)
+      .map((i) => (i.name || i.ticker || '?') + ' ' + fmtPct(i.ret_1d)).join(', ') + '.');
+  }
+
+  const sectors = (Array.isArray(snapshot.sectors) ? snapshot.sectors : [])
+    .filter((s) => Number.isFinite(s.avg_ret_1d))
+    .slice().sort((a, b) => b.avg_ret_1d - a.avg_ret_1d);
+  if (sectors.length) {
+    parts.push('Settori (1g): ' + sectors.slice(0, 8)
+      .map((s) => (s.label || s.key || '?') + ' ' + fmtPct(s.avg_ret_1d)).join(', ') + '.');
+  }
+
+  const rates = Array.isArray(snapshot.rates) ? snapshot.rates : [];
+  if (rates.length) {
+    parts.push('Tassi: ' + rates.slice(0, 6)
+      .map((r) => (r.name || r.series_id || '?') + ' ' + fmtNum(r.value) + '%').join(', ') + '.');
+  }
+
+  const cb = Array.isArray(snapshot.cb_events) ? snapshot.cb_events : [];
+  if (cb.length) {
+    const DIR = { hike: 'rialzo', cut: 'taglio', hold: 'invariato' };
+    parts.push('Banche centrali: ' + cb.slice(0, 6)
+      .map((e) => (e.bank || '?') + ' ' + fmtNum(e.rate) + '% (' + (DIR[e.direction] || e.direction || '—') + ')')
+      .join(', ') + '.');
+  }
+
+  const movers = snapshot.movers || {};
+  const gainers = Array.isArray(movers.gainers) ? movers.gainers : [];
+  const losers = Array.isArray(movers.losers) ? movers.losers : [];
+  if (gainers.length) {
+    parts.push('Top rialzi: ' + gainers.slice(0, 4)
+      .map((m) => (m.name || m.ticker || '?') + ' ' + fmtPct(m.ret_1d)).join(', ') + '.');
+  }
+  if (losers.length) {
+    parts.push('Top ribassi: ' + losers.slice(0, 4)
+      .map((m) => (m.name || m.ticker || '?') + ' ' + fmtPct(m.ret_1d)).join(', ') + '.');
+  }
+
+  const earnings = Array.isArray(snapshot.earnings) ? snapshot.earnings : [];
+  if (earnings.length) {
+    parts.push('Earnings in arrivo: ' + earnings.slice(0, 5)
+      .map((e) => (e.name || e.ticker || '?') + ' (' + fmtDate(e.date) + ')').join(', ') + '.');
+  }
+
+  const triggers = (Array.isArray(snapshot.triggers) ? snapshot.triggers : [])
+    .map((t) => t && t.title).filter(Boolean);
+  if (triggers.length) {
+    parts.push('Catalizzatori: ' + triggers.slice(0, 4).join('; ') + '.');
+  }
+
+  let ctx = parts.join(' ');
+  if (ctx.length > 1500) ctx = ctx.slice(0, 1499) + '…';
+  return ctx;
+}
+
+/**
+ * Append a message bubble to #chatLog and auto-scroll.
+ *   - role 'user'   -> textContent only (never HTML).
+ *   - role 'system' -> textContent only, error/system styling.
+ *   - role 'assistant' -> markdown via the SAME marked+DOMPurify pattern as
+ *     renderBrief; links hardened with setSafeExternalLink. innerHTML only ever
+ *     receives sanitised output.
+ */
+function appendChatMessage(role, content) {
+  const log = document.getElementById('chatLog');
+  if (!log) return null;
+  const msg = el('div', 'chat-msg chat-' + role);
+
+  if (role === 'assistant') {
+    const bubble = el('div', 'chat-bubble brief-body');
+    const md = typeof content === 'string' ? content : '';
+    const clean = window.DOMPurify.sanitize(window.marked.parse(md), CHAT_SANITIZE);
+    bubble.innerHTML = clean; // sanitised output only
+    bubble.querySelectorAll('a').forEach(setSafeExternalLink);
+    msg.appendChild(bubble);
+  } else {
+    // user + system: plain text, never parsed as HTML
+    msg.appendChild(el('div', 'chat-bubble', typeof content === 'string' ? content : String(content)));
+  }
+
+  log.appendChild(msg);
+  log.scrollTop = log.scrollHeight;
+  return msg;
+}
+
+/** Insert the "sto scrivendo…" typing indicator; returns the node to remove. */
+function showChatTyping() {
+  const log = document.getElementById('chatLog');
+  if (!log) return null;
+  const msg = el('div', 'chat-msg chat-assistant');
+  const bubble = el('div', 'chat-bubble chat-typing');
+  bubble.setAttribute('aria-label', 'Sto scrivendo…');
+  for (let i = 0; i < 3; i++) bubble.appendChild(el('span', 'chat-dot'));
+  msg.appendChild(bubble);
+  log.appendChild(msg);
+  log.scrollTop = log.scrollHeight;
+  return msg;
+}
+
+/** Grow the textarea with its content up to the CSS max-height. */
+function autoGrowChatInput(ta) {
+  if (!ta) return;
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+}
+
+/** Read + cap the input, render the user turn, POST to /api/chat, render reply/error. */
+function sendChat() {
+  const input = document.getElementById('chatInput');
+  const sendBtn = document.getElementById('chatSend');
+  if (!input || chatBusy) return;
+
+  let text = (input.value || '').trim();
+  if (!text) return;
+  if (text.length > CHAT_MAX_INPUT) text = text.slice(0, CHAT_MAX_INPUT);
+
+  appendChatMessage('user', text);
+  chatHistory.push({ role: 'user', content: text });
+  trimChatHistory();
+
+  input.value = '';
+  autoGrowChatInput(input);
+
+  chatBusy = true;
+  input.disabled = true;
+  if (sendBtn) sendBtn.disabled = true;
+  const typing = showChatTyping();
+
+  const done = () => {
+    if (typing && typing.parentNode) typing.parentNode.removeChild(typing);
+    chatBusy = false;
+    input.disabled = false;
+    if (sendBtn) sendBtn.disabled = false;
+    input.focus();
+  };
+
+  fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ messages: chatHistory, context: buildMarketContext(currentSnapshot) })
+  })
+    .then((res) => res.json().catch(() => ({})).then((data) => ({ ok: res.ok, data: data })))
+    .then((r) => {
+      if (r.ok && r.data && typeof r.data.reply === 'string') {
+        appendChatMessage('assistant', r.data.reply);
+        chatHistory.push({ role: 'assistant', content: r.data.reply });
+        trimChatHistory();
+      } else {
+        const err = (r.data && typeof r.data.error === 'string' && r.data.error)
+          ? r.data.error
+          : 'Si è verificato un errore. Riprova.';
+        appendChatMessage('system', err);
+      }
+    })
+    .catch(() => {
+      appendChatMessage('system', "Impossibile contattare l'assistente. Controlla la connessione e riprova.");
+    })
+    .then(done);
+}
+
+/** Wire the fab/panel toggle, close, Esc, Enter-to-send. Called once from main(). */
+function wireChat() {
+  const fab = document.getElementById('chatFab');
+  const panel = document.getElementById('chatPanel');
+  const closeBtn = document.getElementById('chatClose');
+  const input = document.getElementById('chatInput');
+  const sendBtn = document.getElementById('chatSend');
+  if (!fab || !panel) return;
+
+  const openChat = () => {
+    panel.hidden = false;
+    fab.classList.add('open');
+    fab.setAttribute('aria-expanded', 'true');
+    if (input) { autoGrowChatInput(input); input.focus(); }
+  };
+  const closeChat = (returnFocus) => {
+    panel.hidden = true;
+    fab.classList.remove('open');
+    fab.setAttribute('aria-expanded', 'false');
+    if (returnFocus) fab.focus();
+  };
+
+  fab.addEventListener('click', () => { if (panel.hidden) openChat(); else closeChat(false); });
+  if (closeBtn) closeBtn.addEventListener('click', () => closeChat(true));
+  if (sendBtn) sendBtn.addEventListener('click', sendChat);
+
+  if (input) {
+    input.addEventListener('input', () => autoGrowChatInput(input));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+    });
+  }
+
+  // Esc closes the panel and returns focus to the fab (only while open).
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !panel.hidden) closeChat(true);
+  });
+}
+
 /* ---------- boot ---------- */
 
 async function main() {
   wireModal();
+  wireChat();
   const result = await loadSnapshot();
 
   if (result.status === 'integrity-error') {
@@ -1147,6 +1388,7 @@ async function main() {
   }
 
   const snapshot = result.snapshot;
+  currentSnapshot = snapshot; // stash for the AI chat grounding context
   try {
     // Render order follows the on-page section order for clarity; every renderer
     // targets elements by id so the actual ordering is fixed by the markup.
