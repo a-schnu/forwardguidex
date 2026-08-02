@@ -3,8 +3,8 @@ name: forwardguidex-daily
 # Full daily pipeline: ingest -> marts -> brief -> Telegram (fwdx run-daily,
 # app-scoped) -> export the prod snapshot from the warehouse -> validate
 # (fail-closed) -> Cloudflare Pages Direct Upload of app/ -> authenticated
-# smoke test -> (separate GCP-auth/WIF job) archive to Firestore (create-only)
-# -> release the shared production lock.
+# smoke test against the UNIQUE deployment URL -> (separate GCP-auth/WIF job)
+# archive to Firestore (create-only) -> release the shared production lock.
 #
 # Shares a single `production` release lock with deploy-app.yml (see
 # `concurrency` below): the two workflows use the SAME group name, so a
@@ -14,7 +14,13 @@ name: forwardguidex-daily
 on:
   schedule:
     - cron: "30 11 * * 1-5" # 11:30 UTC on weekdays (pre US open)
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      allow_bootstrap:
+        description: "Allow deploy without a prior successful deployment (rollback target). Only for the very first production deploy."
+        required: false
+        type: boolean
+        default: false
 
 # Least privilege by default; `id-token: write` is granted ONLY on the
 # `publish` job below (the one GCP/WIF-auth job in this workflow).
@@ -44,6 +50,10 @@ jobs:
     name: run-daily -> export -> validate -> deploy -> smoke
     runs-on: ubuntu-latest
     environment: production
+    # Bounded job budget: data pull + build + deploy + smoke normally finishes
+    # in ~15 min; the GitHub-default 6h timeout would mask a stuck provider
+    # (P1.4). Keep enough margin for a slow smoke retry.
+    timeout-minutes: 30
     permissions:
       contents: read
     outputs:
@@ -51,6 +61,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # P1.5: no git credentials persisted into the runner env (we never
+          # push from CI). fetch-depth:1 is enough for `git rev-parse HEAD`.
+          persist-credentials: false
+          fetch-depth: 1
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -79,6 +94,7 @@ jobs:
           SNAP=$(ls dist/snapshot.*.json | head -n1)
           ARTIFACT_SHA256=$(python3 -c "import json,sys; print(json.load(open('dist/latest.json'))['artifact_sha256'])")
           echo "snapshot_path=$SNAP" >> "$GITHUB_OUTPUT"
+          echo "snapshot_name=$(basename $SNAP)" >> "$GITHUB_OUTPUT"
           echo "artifact_sha256=$ARTIFACT_SHA256" >> "$GITHUB_OUTPUT"
           echo "ARTIFACT_SHA256=$ARTIFACT_SHA256" >> "$GITHUB_ENV"
 
@@ -93,19 +109,76 @@ jobs:
           cp dist/snapshot.*.json dist/latest.json app/data/
           ls -la app/data/
 
+      # -----------------------------------------------------------------
+      # P0.3 — Capture the pre-deploy rollback target.
+      #
+      # Fail-closed lookup: bounded retries, curl --fail on HTTP errors,
+      # strict JSON shape validation. Empty result is only tolerated when
+      # workflow_dispatch.allow_bootstrap is true (documented bootstrap
+      # for the very first prod deploy).
+      # -----------------------------------------------------------------
       - name: Capture current live deployment (pre-deploy, for rollback target)
         id: pre
-        continue-on-error: true   # rollback-target lookup must never abort the deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ALLOW_BOOTSTRAP: ${{ github.event.inputs.allow_bootstrap || 'false' }}
         run: |
-          set -uo pipefail
-          resp=$(curl -sS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"             "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${CF_PROJECT_NAME}/deployments?per_page=25") || true
-          prev_id=$(printf '%s' "$resp" | jq -r '[.result[]? | select(.environment=="production" and .latest_stage.status=="success")][0].id // ""' 2>/dev/null || true)
-          echo "deployment_id=${prev_id:-}" >> "$GITHUB_OUTPUT"
-          echo "Previous successful production deployment: ${prev_id:-none}"
+          set -euo pipefail
+          resp_file=$(mktemp)
+          # Retries only for transient 5xx/network; --fail-with-body makes
+          # curl exit non-zero for any 4xx/5xx while still saving the body.
+          curl -sS --fail-with-body \
+               --retry 3 --retry-delay 4 --retry-connrefused \
+               --retry-all-errors \
+               --connect-timeout 10 --max-time 45 \
+               -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+               -o "$resp_file" \
+               "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${CF_PROJECT_NAME}/deployments?per_page=25"
+          python3 - "$resp_file" <<-'PYEOF'
+          	import json
+          	import os
+          	import re
+          	import sys
+          	path = sys.argv[1]
+          	try:
+          	    body = json.load(open(path, encoding="utf-8"))
+          	except Exception as e:  # noqa: BLE001
+          	    sys.exit(f"::error::rollback lookup: unparseable JSON from Cloudflare API ({e}).")
+          	if not isinstance(body, dict) or body.get("success") is not True:
+          	    errs = body.get("errors") if isinstance(body, dict) else None
+          	    sys.exit(f"::error::rollback lookup: Cloudflare API success!=true ({errs}).")
+          	result = body.get("result")
+          	if not isinstance(result, list):
+          	    sys.exit("::error::rollback lookup: response.result is not an array.")
+          	prev_id = ""
+          	id_pat = re.compile(r"^[0-9a-fA-F-]{8,64}$")
+          	for d in result:
+          	    if not isinstance(d, dict):
+          	        continue
+          	    if d.get("environment") != "production":
+          	        continue
+          	    stage = (d.get("latest_stage") or {}).get("status")
+          	    if stage != "success":
+          	        continue
+          	    did = d.get("id") or ""
+          	    if not id_pat.match(did):
+          	        continue
+          	    prev_id = did
+          	    break
+          	if not prev_id:
+          	    if os.environ.get("ALLOW_BOOTSTRAP", "").lower() == "true":
+          	        print("::warning::rollback lookup: no previous successful production deployment; bootstrap explicitly allowed.")
+          	    else:
+          	        sys.exit("::error::rollback lookup: no previous successful production deployment found. Re-run with workflow_dispatch input allow_bootstrap=true only for the first deploy.")
+          	with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+          	    f.write(f"deployment_id={prev_id}\n")
+          	print(f"Previous successful production deployment: {prev_id or 'none (bootstrap)'}")
+          	PYEOF
 
+      # -----------------------------------------------------------------
+      # Deploy to Cloudflare Pages Direct Upload.
+      # -----------------------------------------------------------------
       - name: Deploy app/ to Cloudflare Pages (Direct Upload)
         id: deploy_cf
         uses: cloudflare/wrangler-action@da0e0dfe58b7a431659754fdf3f186c529afbe65 # v3.14.1
@@ -114,86 +187,38 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy app --project-name=fgx-dashboard --branch=main
 
-      # Authenticated smoke test (Access-protected app), inline Python, same
-      # contract as deploy-app.yml's smoke step: Access-OK (200) ·
-      # latest.json valid JSON · referenced snapshot exists · schema_version==1
-      # · raw-bytes SHA-256 == artifact_sha256 · is_demo==false ·
-      # freshness/quality present · security headers present. Additionally
-      # asserts the LIVE artifact_sha256 equals the one we just exported, to
-      # catch a stale/cached deploy rather than silently passing against old data.
-      - name: Verify deployment (staged artifact) + best-effort live check
+      # -----------------------------------------------------------------
+      # P0.2 — Fail-closed smoke test.
+      #
+      # Runs against the UNIQUE deployment URL first (`steps.deploy_cf`
+      # output `deployment-url`) to bypass cache/alias propagation, then
+      # the stable APP_HOST. Every mandatory probe is one of PASS / FAIL /
+      # INCONCLUSIVE and INCONCLUSIVE fails the gate (rollback).
+      #
+      # Contract:
+      #   * unauth GET /                    -> exactly 401 + WWW-Authenticate
+      #   * auth GET / (correct pwd)        -> 200
+      #   * auth GET / (wrong pwd)          -> 401
+      #   * live /data/latest.json          -> valid JSON, expected snapshot filename
+      #   * live SHA-256 of served snapshot -> matches export's artifact_sha256
+      #   * unauth POST /api/chat           -> 401 (middleware gate)
+      #   * auth GET /api/chat              -> 405
+      #   * auth POST /api/chat malformed   -> 400
+      #   * cross-origin POST /api/chat     -> 403 (with correct auth)
+      # -----------------------------------------------------------------
+      - name: Verify deployment (live bytes + auth gate + /api/chat)
         id: smoke
         continue-on-error: true
         env:
           APP_HOST: ${{ env.APP_HOST }}
+          UNIQUE_DEPLOY_URL: ${{ steps.deploy_cf.outputs.deployment-url }}
           DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
+          EXPECTED_ARTIFACT_SHA256: ${{ steps.export.outputs.artifact_sha256 }}
+          EXPECTED_SNAPSHOT_NAME: ${{ steps.export.outputs.snapshot_name }}
         run: |
           set -euo pipefail
-          python3 - <<'PYEOF' | tee smoke-test.log
-          import base64, hashlib, json, os, sys, time, urllib.error, urllib.request
-          # --- 1) Verify the exact prod bytes staged into app/data/ (what wrangler uploaded). ---
-          manifest = json.load(open("app/data/latest.json"))
-          expected = manifest["artifact_sha256"]
-          snap_file = os.path.join("app/data", manifest["snapshot"])
-          raw = open(snap_file, "rb").read()
-          digest = hashlib.sha256(raw).hexdigest()
-          if digest != expected:
-              sys.exit(f"::error::Staged {snap_file} sha256 {digest} != manifest {expected}.")
-          snap = json.loads(raw)
-          meta = snap.get("meta", {})
-          if meta.get("schema_version") != 1:
-              sys.exit(f"::error::schema_version={meta.get('schema_version')!r}, expected 1.")
-          if meta.get("is_demo") is not False:
-              sys.exit(f"::error::is_demo={meta.get('is_demo')!r}, expected false.")
-          if not meta.get("freshness") or not meta.get("quality"):
-              sys.exit("::error::freshness/quality missing.")
-          print(f"OK: staged prod artifact verified (sha256 ok, schema_version=1, is_demo=false, freshness={meta.get('freshness')}, quality={meta.get('quality')}).")
-          # --- 2) Live password-gate verification (the dashboard MUST NOT be publicly readable). ---
-          # The gate is a Cloudflare Pages Function (functions/_middleware.js at the REPO ROOT).
-          # If it is not running, an UNauthenticated request returns 200 and the dashboard is
-          # public — a hard failure that rolls the deploy back. Cloudflare may 403 the CI
-          # datacenter IP (an edge block, independent of our gate); that case is inconclusive
-          # -> warning only, so we never turn a real public exposure into a false pass.
-          host = os.environ["APP_HOST"].rstrip("/")
-          ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-          good_auth = "Basic " + base64.b64encode(("ci:" + os.environ["DASHBOARD_PASSWORD"]).encode()).decode()
-          def probe(auth):
-              headers = {"User-Agent": ua, "Cache-Control": "no-cache"}
-              if auth:
-                  headers["Authorization"] = auth
-              req = urllib.request.Request(f"{host}/?_smoke={int(time.time()*1000)}", headers=headers)
-              try:
-                  with urllib.request.urlopen(req, timeout=20) as r:
-                      return r.status, r.headers
-              except urllib.error.HTTPError as e:
-                  return e.code, e.headers
-              except Exception:
-                  return None, None
-          # 2a) No credentials -> must be challenged (401), never served (200) or 503 (misconfig).
-          status, hdrs = probe(None)
-          if status == 200:
-              sys.exit("::error::SECURITY: unauthenticated GET / returned 200 — the password gate is NOT enforced and the dashboard is PUBLIC. The Pages Function (functions/_middleware.js) is not running. Refusing (rollback).")
-          if status == 503:
-              sys.exit("::error::unauthenticated GET / returned 503 — the gate Function runs but DASHBOARD_PASSWORD is not set on the Cloudflare Pages project (Settings -> Variables and Secrets -> Production). Refusing (rollback).")
-          if status == 401:
-              chal = (hdrs.get("WWW-Authenticate") if hdrs else None) or ""
-              print(f"OK: unauthenticated GET / -> 401 (gate enforced; WWW-Authenticate={chal!r}).")
-          elif status == 403:
-              print("::warning::unauthenticated GET / -> 403 (Cloudflare edge likely blocked the CI IP; cannot verify the gate from CI — verify in a browser). Not failing.")
-          else:
-              print(f"::warning::unauthenticated GET / -> {status} (unexpected/unreachable; verify in a browser). Not failing.")
-          # 2b) With the correct password -> must be admitted (200).
-          status, _ = probe(good_auth)
-          if status == 200:
-              print("OK: authenticated GET / -> 200 (correct password admitted).")
-          elif status == 401:
-              sys.exit("::error::authenticated GET / -> 401 — the correct DASHBOARD_PASSWORD was rejected; the CI secret and the Pages project secret disagree. Refusing (rollback).")
-          elif status == 403:
-              print("::warning::authenticated GET / -> 403 (Cloudflare edge likely blocked the CI IP). Not failing.")
-          else:
-              print(f"::warning::authenticated GET / -> {status} (unexpected/unreachable). Not failing.")
-          print("SMOKE PASSED (staged artifact + password-gate verification).")
-          PYEOF
+          python3 .github/workflows/smoke.py 2>&1 | tee smoke-test.log
+
       - name: Upload smoke test log
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -218,19 +243,21 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${PREV_DEPLOYMENT_ID:-}" ]; then
-            echo "::error::Smoke test failed and no previous successful deployment was found to roll back to. Manual intervention required."
+            echo "::error::Smoke failed but no previous successful deployment exists (bootstrap-run). Manual intervention required."
             exit 1
           fi
           echo "Rolling back Cloudflare Pages project fgx-dashboard to deployment $PREV_DEPLOYMENT_ID"
-          curl -sS -X POST \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/fgx-dashboard/deployments/${PREV_DEPLOYMENT_ID}/rollback" \
-            -o rollback-response.json
-          cat rollback-response.json
-          python3 -c "import json,sys; body=json.load(open('rollback-response.json')); sys.exit(0 if body.get('success') else 1)"
+          curl -sS --fail-with-body \
+               --retry 3 --retry-delay 4 --retry-connrefused --retry-all-errors \
+               --connect-timeout 10 --max-time 60 \
+               -X POST \
+               -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+               -H "Content-Type: application/json" \
+               "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/fgx-dashboard/deployments/${PREV_DEPLOYMENT_ID}/rollback" \
+               -o rollback-response.json
+          python3 -c "import json,sys; b=json.load(open('rollback-response.json')); sys.exit(0 if b.get('success') is True else 1)"
 
-      - name: Verify rollback (re-run Access + hash checks only)
+      - name: Verify rollback (re-run auth + hash checks against stable alias)
         if: always() && steps.smoke.outcome == 'failure'
         env:
           APP_HOST: ${{ env.APP_HOST }}
@@ -247,10 +274,11 @@ jobs:
           	import urllib.error
           	import urllib.request
 
-          	host = os.environ["APP_HOST"]
+          	host = os.environ["APP_HOST"].rstrip("/")
           	headers = {
           	    "Authorization": "Basic " + base64.b64encode(("ci:" + os.environ["DASHBOARD_PASSWORD"]).encode()).decode(),
           	    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+          	    "Cache-Control": "no-cache",
           	}
           	cache_bust = f"?_smoke_rollback={int(time.time())}"
 
@@ -306,12 +334,16 @@ jobs:
     needs: build-validate-deploy
     runs-on: ubuntu-latest
     environment: production
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write # ONLY this job needs id-token:write, for WIF -> GCP.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

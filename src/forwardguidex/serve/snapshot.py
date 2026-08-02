@@ -213,6 +213,58 @@ def _sector_order(universe: dict) -> dict[str, dict[str, int]]:
     return out
 
 
+def _news_source_health(con) -> dict | None:
+    """Fetch the latest ingest health rollup for GDELT (may be None on fresh DB)."""
+    try:
+        from ..ingest.news import latest_news_health
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        return latest_news_health(con)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _collect_source_health(con) -> dict:
+    """Build ``meta.source_health`` map for the snapshot.
+
+    Currently only GDELT is instrumented (P0.1). Other providers (UST / NY Fed
+    / BIS / yfinance) can be added incrementally once their ingesters record
+    per-run health rows in analogous ``raw_*_health`` tables.
+    """
+    out: dict = {}
+    gd = _news_source_health(con)
+    if gd is not None:
+        out["gdelt"] = gd
+    return out
+
+
+# News is a REQUIRED domain: a total-provider outage cannot ship as quality=OK.
+_REQUIRED_HEALTH_KEYS = ("gdelt",)
+
+
+def _quality_from_health(source_health: dict, freshness_overall: str,
+                         base_quality: str) -> str:
+    """Derive published ``meta.quality`` from source_health + freshness.
+
+    OK -> only if every required provider is OK AND freshness is FRESH.
+    DEGRADED -> at least one required provider is DEGRADED (partial failure).
+    FAILED -> any required provider is FAILED (validator will block deployment).
+    """
+    if freshness_overall not in ("FRESH",):
+        base_quality = "DEGRADED"
+
+    worst = "OK"
+    rank = {"OK": 0, "DEGRADED": 1, "FAILED": 2}
+    for key in _REQUIRED_HEALTH_KEYS:
+        s = (source_health.get(key) or {}).get("status")
+        if s in rank and rank[s] > rank[worst]:
+            worst = s
+    if rank[worst] > rank.get(base_quality, 0):
+        return worst
+    return base_quality
+
+
 def build_snapshot(con, *, market_state: str = "PRE_OPEN",
                    now: datetime | None = None, quality: str = "OK") -> dict:
     now = now or datetime.now(timezone.utc)
@@ -352,8 +404,10 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
         "triggers": trig,
         "brief": brief,
     }
+    source_health = _collect_source_health(con)
     payload["meta"] = _build_meta(payload, market_state=market_state, now=now,
-                                  quality=quality, is_demo=False)
+                                  quality=quality, is_demo=False,
+                                  source_health=source_health)
     return payload
 
 
@@ -385,7 +439,8 @@ def _market_as_of(payload: dict) -> list[str]:
 
 
 def _build_meta(payload: dict, *, market_state: str, now: datetime,
-                quality: str, is_demo: bool) -> dict:
+                quality: str, is_demo: bool,
+                source_health: dict | None = None) -> dict:
     keys = _present_source_keys(payload)
     freshness = fcal.assess_snapshot(payload, now=now)
     market_dt = sorted(d for d in (fcal.parse_dt(s) for s in _market_as_of(payload)) if d)
@@ -395,7 +450,8 @@ def _build_meta(payload: dict, *, market_state: str, now: datetime,
     oldest_dt = (every_dt[0] if every_dt else data_dt)
     data_as_of = data_dt.isoformat()
     oldest = oldest_dt.isoformat()
-    q = quality if freshness.overall == "FRESH" else "DEGRADED"
+    sh = source_health or {}
+    q = _quality_from_health(sh, freshness.overall, quality)
     meta = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _now_iso(now),
@@ -414,6 +470,8 @@ def _build_meta(payload: dict, *, market_state: str, now: datetime,
         "market_state_at_generation": market_state,
         "attribution": rights.attribution_block(keys),
     }
+    if sh:
+        meta["source_health"] = sh
     return meta
 
 

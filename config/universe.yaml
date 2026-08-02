@@ -39,7 +39,13 @@ futures:
   - {ticker: "NQ=F",  name: "Nasdaq e-mini"}
   - {ticker: "RTY=F", name: "Russell e-mini"}
   - {ticker: "YM=F",  name: "Dow e-mini"}
-  - {ticker: "DX=F",  name: "US Dollar Index"}
+  # DX=F was RETIRED (P1.3 remediation): yfinance consistently returns
+  # `404 Quote not found for symbol: DX=F` and the daily pipeline was
+  # spamming an unavailable endpoint. The DXY spot line (DX-Y.NYB) has
+  # been observed to work in ad-hoc queries but has NOT been validated
+  # against our EOD calendar / freshness rules yet, so it's not added
+  # here on faith — restore it with a dedicated PR + a critical-symbol
+  # test once verified in a preview run.
   - {ticker: "6E=F",  name: "Euro FX"}
   - {ticker: "ZC=F",  name: "Corn"}
   - {ticker: "ZW=F",  name: "Wheat"}

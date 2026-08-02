@@ -149,6 +149,60 @@ def _coverage_errors(payload: dict) -> list[str]:
     return errs
 
 
+# Required source-health domains: a total failure or fallback here cannot ship
+# as `quality=OK` / `freshness=FRESH`. Extend as we instrument more providers.
+_REQUIRED_HEALTH_DOMAINS = ("gdelt",)
+
+
+def _source_health_errors(payload: dict) -> list[str]:
+    """Reject values, not only field presence.
+
+    Enforces the P0.1 remediation rules:
+      * ``quality=OK`` forbidden when a required domain is FAILED.
+      * ``freshness=FRESH`` forbidden when any domain is a STALE_FALLBACK.
+      * ``news.rows=0`` forbidden when GDELT reports any failure.
+      * request/success/failure counts must be internally consistent.
+    """
+    errs: list[str] = []
+    meta = payload.get("meta", {}) or {}
+    sh = meta.get("source_health") or {}
+    quality = meta.get("quality")
+    freshness = meta.get("freshness")
+
+    for domain in _REQUIRED_HEALTH_DOMAINS:
+        info = sh.get(domain)
+        if info is None:
+            continue
+        status = info.get("status")
+        attempted = info.get("attempted_queries") or 0
+        success = info.get("successful_queries") or 0
+        failed = info.get("failed_queries") or 0
+        rate_limited = info.get("rate_limited_queries") or 0
+        rows = info.get("rows") or 0
+
+        if status == "FAILED" and quality == "OK":
+            errs.append(f"source_health.{domain}: status=FAILED but meta.quality=OK")
+        if status == "STALE_FALLBACK" and freshness == "FRESH":
+            errs.append(
+                f"source_health.{domain}: STALE_FALLBACK but meta.freshness=FRESH")
+        if success + failed > attempted:
+            errs.append(
+                f"source_health.{domain}: success({success})+failed({failed}) > "
+                f"attempted({attempted})")
+        if rate_limited > attempted:
+            errs.append(
+                f"source_health.{domain}: rate_limited_queries({rate_limited}) > "
+                f"attempted_queries({attempted})")
+        if domain == "gdelt":
+            if attempted > 0 and success == 0 and rows > 0:
+                errs.append(
+                    "source_health.gdelt: rows>0 but successful_queries=0 — inconsistent")
+            if failed > 0 and rows == 0 and quality == "OK":
+                errs.append(
+                    "source_health.gdelt: every query failed AND rows=0 but meta.quality=OK")
+    return errs
+
+
 def _freshness_errors(payload: dict, now: datetime | None) -> list[str]:
     fr = fcal.assess_snapshot(payload, now=now)
     if fr.overall != "FRESH":
@@ -203,6 +257,7 @@ def validate_payload(payload: dict, raw: bytes, *, mode: str, now: datetime | No
     errors += _anomaly_errors(payload)
     errors += _coverage_errors(payload)
     errors += _freshness_errors(payload, now)
+    errors += _source_health_errors(payload)
     errors += _rights_errors(payload, mode)
     # demo guard
     is_demo = bool(payload.get("meta", {}).get("is_demo"))

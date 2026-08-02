@@ -36,7 +36,12 @@ def _ingest(which: str) -> None:
         print(f"[rates] rows: {rates_ingest.ingest_rates(con)}")
     if which in ("news", "all"):
         from .ingest import news as news_ingest
-        print(f"[news] rows: {news_ingest.ingest_news(con)}")
+        report = news_ingest.ingest_news_with_report(con)
+        print(
+            f"[news] rows: {report.rows} "
+            f"(status={report.status}, ok={report.successful_queries}/{report.attempted_queries}, "
+            f"rate_limited={report.rate_limited_queries})"
+        )
     # Earnings + triggers are SUPPLEMENTARY event sources over external APIs
     # (yfinance / Federal Register / SEC). A failure there must never block the
     # core market-data pipeline/deploy, so they are non-fatal in the aggregate run

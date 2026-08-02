@@ -1,0 +1,159 @@
+"""P0.1: news collection rolls up per-query outcomes into source_health.
+
+Uses monkeypatch to swap the shared HTTP client so no real GDELT call is made.
+Verifies the two must-not-regress cases from the brief:
+
+* all queries fail with 429 -> status=FAILED, rows=0, and the snapshot
+  validator refuses ``quality=OK``;
+* a partial-failure day (some 429, some 200) -> status=DEGRADED with exact
+  counts and the validator still accepts the snapshot.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from forwardguidex.ingest import http_client as httpc
+from forwardguidex.ingest import news as newsmod
+from forwardguidex.serve import snapshot as S
+from forwardguidex.serve import validate as V
+
+
+NOW = datetime(2026, 8, 1, 8, 0, tzinfo=timezone.utc)
+
+
+class _StubClient:
+    def __init__(self, per_key):
+        # per_key: {topic_key: FetchResult}
+        self._per_key = per_key
+
+    def fetch_json(self, url, *, params=None, **_kw):
+        key = params["query"] if params else ""
+        return self._per_key[key]
+
+    def close(self):
+        pass
+
+
+def _make_result(*, ok, articles=0, status=200, err=httpc.ErrorClass.OK,
+                 rate_limited=0):
+    data = {"articles": [{"url": f"https://x/{i}"} for i in range(articles)]}
+    return httpc.FetchResult(
+        ok=ok,
+        status=status,
+        error_class=err,
+        error_detail="" if ok else "HTTP " + str(status),
+        attempts=1 + rate_limited,
+        rate_limited_attempts=rate_limited,
+        elapsed=0.01,
+        data=data if ok else None,
+    )
+
+
+class _StubUniverse:
+    QUERIES = [
+        {"key": "fed",    "query": "Q-FED"},
+        {"key": "bce",    "query": "Q-BCE"},
+        {"key": "petrol", "query": "Q-OIL"},
+    ]
+
+    @classmethod
+    def load(cls):
+        return {"gdelt_queries": cls.QUERIES}
+
+
+def _install_stub(monkeypatch, per_key):
+    def stub_ctor():
+        stub = _StubClient(per_key)
+        return stub
+
+    monkeypatch.setattr(newsmod, "HttpClient", stub_ctor)
+    monkeypatch.setattr(newsmod, "load_universe", _StubUniverse.load)
+    # Skip DB writes; the report is what we care about here.
+    monkeypatch.setattr(newsmod, "upsert", lambda con, table, df, keys: len(df))
+    monkeypatch.setattr(newsmod, "_persist_health", lambda con, ts, r: None)
+
+
+def test_all_429_report_is_failed(monkeypatch):
+    per_key = {
+        "Q-FED":  _make_result(ok=False, status=429, err=httpc.ErrorClass.RATE_LIMITED, rate_limited=4),
+        "Q-BCE":  _make_result(ok=False, status=429, err=httpc.ErrorClass.RATE_LIMITED, rate_limited=4),
+        "Q-OIL":  _make_result(ok=False, status=429, err=httpc.ErrorClass.RATE_LIMITED, rate_limited=4),
+    }
+    _install_stub(monkeypatch, per_key)
+    r = newsmod.ingest_news_with_report(con=None)
+    assert r.status == "FAILED"
+    assert r.attempted_queries == 3
+    assert r.successful_queries == 0
+    assert r.failed_queries == 3
+    assert r.rate_limited_queries == 3
+    assert r.rows == 0
+
+
+def test_partial_failure_is_degraded(monkeypatch):
+    per_key = {
+        "Q-FED":  _make_result(ok=True,  articles=5),
+        "Q-BCE":  _make_result(ok=False, status=429, err=httpc.ErrorClass.RATE_LIMITED, rate_limited=4),
+        "Q-OIL":  _make_result(ok=True,  articles=2),
+    }
+    _install_stub(monkeypatch, per_key)
+    r = newsmod.ingest_news_with_report(con=None)
+    assert r.status == "DEGRADED"
+    assert r.successful_queries == 2
+    assert r.failed_queries == 1
+    assert r.rate_limited_queries == 1
+    assert r.rows == 7  # 5 + 2 (stubbed upsert returns len)
+
+
+def test_validator_rejects_ok_when_gdelt_failed():
+    payload = S.demo_snapshot()
+    payload["meta"]["source_health"] = {
+        "gdelt": {
+            "status": "FAILED",
+            "attempted_queries": 10,
+            "successful_queries": 0,
+            "failed_queries": 10,
+            "rate_limited_queries": 10,
+            "rows": 0,
+            "errors": [],
+        }
+    }
+    payload["meta"]["quality"] = "OK"
+    raw = S._canonical_bytes(payload)
+    errs = V.validate_payload(payload, raw, mode="LOCAL_DEMO", now=NOW,
+                              snap_path=Path("x.json"), manifest_path=None)
+    assert any("source_health.gdelt" in e and "quality=OK" in e for e in errs), errs
+
+
+def test_validator_accepts_degraded_with_rows():
+    payload = S.demo_snapshot()
+    payload["meta"]["source_health"] = {
+        "gdelt": {
+            "status": "DEGRADED",
+            "attempted_queries": 10,
+            "successful_queries": 7,
+            "failed_queries": 3,
+            "rate_limited_queries": 2,
+            "rows": 40,
+            "errors": [{"category": "fed", "class": "rate_limited", "status": 429, "attempts": 4}],
+        }
+    }
+    payload["meta"]["quality"] = "DEGRADED"
+    raw = S._canonical_bytes(payload)
+    errs = V.validate_payload(payload, raw, mode="LOCAL_DEMO", now=NOW,
+                              snap_path=Path("x.json"), manifest_path=None)
+    assert not any("source_health" in e for e in errs), errs
+
+
+def test_validator_rejects_fresh_when_stale_fallback():
+    payload = S.demo_snapshot()
+    payload["meta"]["source_health"] = {
+        "gdelt": {"status": "STALE_FALLBACK", "rows": 5, "attempted_queries": 3,
+                  "successful_queries": 0, "failed_queries": 3}
+    }
+    raw = S._canonical_bytes(payload)
+    errs = V.validate_payload(payload, raw, mode="LOCAL_DEMO", now=NOW,
+                              snap_path=Path("x.json"), manifest_path=None)
+    assert any("STALE_FALLBACK" in e and "freshness=FRESH" in e for e in errs), errs
