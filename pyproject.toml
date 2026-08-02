@@ -14,6 +14,9 @@ dependencies = [
     "duckdb>=0.10",
     "pandas>=2.0",
     "yfinance>=0.2.40",
+    # yfinance's get_earnings_dates() parses HTML with lxml but doesn't hard-depend
+    # on it; declare it so the earnings ingest works in a clean CI install.
+    "lxml>=4.9",
     "requests>=2.31",
     "PyYAML>=6.0",
     "python-dotenv>=1.0",

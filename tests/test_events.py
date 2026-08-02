@@ -29,6 +29,63 @@ def _macro(series_id, pairs, source="BIS"):
     ])
 
 
+def _trig_row(kind, url, *, ticker=None, topic=None, title="t",
+              date_="2026-07-20", source="federal_register"):
+    return {"kind": kind, "ticker": ticker, "title": title, "date": date_,
+            "url": url, "topic": topic, "source": source,
+            "ingested_at": datetime(2026, 8, 1, tzinfo=timezone.utc).replace(tzinfo=None)}
+
+
+def test_triggers_eo_then_8k_coexist():
+    """Regression: an executive-order-only batch (ticker/topic all-None) must not
+    make DuckDB infer those columns as INTEGER and reject a later 8-K string insert
+    ('Could not convert string ... to INT32'). Verified live 2026-08-02."""
+    from forwardguidex.ingest import triggers
+
+    con = duckdb.connect(":memory:")
+    # 1) EO-only batch -> ticker & topic are entirely None.
+    eo = triggers._triggers_df([
+        _trig_row("executive_order", "https://www.federalregister.gov/documents/1"),
+        _trig_row("executive_order", "https://www.federalregister.gov/documents/2"),
+    ])
+    assert D.upsert(con, "raw_triggers", eo, keys=["kind", "url"]) == 2
+    # 2) 8-K batch with REAL string ticker + topic into the SAME table.
+    sec = triggers._triggers_df([
+        _trig_row("sec_8k", "https://www.sec.gov/Archives/edgar/data/320193/a.htm",
+                  ticker="AAPL", topic="2.02, 7.01", title="AAPL — 8-K",
+                  date_="2026-07-30", source="sec_edgar"),
+    ])
+    assert D.upsert(con, "raw_triggers", sec, keys=["kind", "url"]) == 1
+    out = events.recent_triggers(con, limit=16)
+    kinds = {t["kind"] for t in out}
+    assert kinds == {"executive_order", "sec_8k"}
+    aapl = next(t for t in out if t["kind"] == "sec_8k")
+    assert aapl["ticker"] == "AAPL" and aapl["topic"] == "2.02, 7.01"
+
+
+def test_earnings_all_none_eps_then_float_coexist():
+    """Regression: an all-None eps_estimate batch must not be inferred INTEGER and
+    reject a later float insert (same DuckDB type-inference class as triggers)."""
+    con = duckdb.connect(":memory:")
+
+    def _edf(ticker, eps, edate):
+        df = pd.DataFrame([{"ticker": ticker, "name": ticker,
+                            "earnings_date": date.fromisoformat(edate),
+                            "eps_estimate": eps,
+                            "ingested_at": datetime(2026, 8, 1)}])
+        df["ticker"] = df["ticker"].astype("string")
+        df["name"] = df["name"].astype("string")
+        df["eps_estimate"] = df["eps_estimate"].astype("Float64")
+        return df
+
+    assert D.upsert(con, "raw_earnings", _edf("PFE", None, "2026-08-05"),
+                    keys=["ticker", "earnings_date"]) == 1
+    assert D.upsert(con, "raw_earnings", _edf("AAPL", 1.42, "2026-08-06"),
+                    keys=["ticker", "earnings_date"]) == 1
+    got = con.execute("SELECT COUNT(*) FROM raw_earnings").fetchone()[0]
+    assert got == 2
+
+
 # --------------------------------------------------------------------------- #
 # cb_events — cut / hike / hold derivation
 # --------------------------------------------------------------------------- #

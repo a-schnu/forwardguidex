@@ -34,6 +34,21 @@ FED_REGISTER_URL = "https://www.federalregister.gov/api/v1/documents.json"
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik10}.json"
 
+# raw_triggers string columns. An executive-order-only batch has ticker + topic
+# all-None; DuckDB would infer those as INTEGER and then REJECT a later 8-K insert
+# of real string values ("Could not convert string 'AAPL' to INT32"). Pinning the
+# string columns to the pandas 'string' dtype forces DuckDB to create them VARCHAR
+# regardless of null content, so EO-only and 8-K batches coexist in one table.
+_STR_COLS = ["kind", "ticker", "title", "date", "url", "topic", "source"]
+
+
+def _triggers_df(rows: list[dict]) -> pd.DataFrame:
+    df = pd.DataFrame(rows).drop_duplicates(subset=["kind", "url"], keep="last")
+    for c in _STR_COLS:
+        if c in df.columns:
+            df[c] = df[c].astype("string")
+    return df
+
 
 def _parse_date(v) -> date | None:
     if not v:
@@ -98,8 +113,7 @@ def ingest_executive_orders(con, n: int = 20) -> int:
         })
     if not rows:
         return 0
-    df = pd.DataFrame(rows).drop_duplicates(subset=["kind", "url"], keep="last")
-    return upsert(con, "raw_triggers", df, keys=["kind", "url"])
+    return upsert(con, "raw_triggers", _triggers_df(rows), keys=["kind", "url"])
 
 
 # --------------------------------------------------------------------------- #
@@ -181,8 +195,7 @@ def ingest_sec_8k(con, days: int = 10, per_company: int = 3) -> int:
 
     if not rows:
         return 0
-    df = pd.DataFrame(rows).drop_duplicates(subset=["kind", "url"], keep="last")
-    return upsert(con, "raw_triggers", df, keys=["kind", "url"])
+    return upsert(con, "raw_triggers", _triggers_df(rows), keys=["kind", "url"])
 
 
 def ingest_triggers(con) -> int:
