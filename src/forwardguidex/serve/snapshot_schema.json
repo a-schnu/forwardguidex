@@ -154,6 +154,42 @@
         "sec_edgar": { "type": "string", "maxLength": 2000 }
       }
     },
+    "providerHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "type": "string", "enum": ["OK", "DEGRADED", "FAILED", "STALE_FALLBACK"] },
+        "attempted_queries": { "type": ["integer", "null"], "minimum": 0, "maximum": 1000 },
+        "successful_queries": { "type": ["integer", "null"], "minimum": 0, "maximum": 1000 },
+        "failed_queries": { "type": ["integer", "null"], "minimum": 0, "maximum": 1000 },
+        "rate_limited_queries": { "type": ["integer", "null"], "minimum": 0, "maximum": 1000 },
+        "rows": { "type": ["integer", "null"], "minimum": 0, "maximum": 100000 },
+        "last_success_at": { "type": ["string", "null"], "maxLength": 40 },
+        "checked_at": { "type": ["string", "null"], "maxLength": 40 },
+        "errors": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "category": { "type": "string", "maxLength": 40 },
+              "class": { "type": "string", "maxLength": 24 },
+              "status": { "type": ["integer", "null"] },
+              "attempts": { "type": ["integer", "null"], "minimum": 0, "maximum": 20 }
+            }
+          }
+        }
+      }
+    },
+    "sourceHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gdelt": { "$ref": "#/$defs/providerHealth" }
+      }
+    },
     "meta": {
       "type": "object",
       "additionalProperties": false,
@@ -169,12 +205,12 @@
         "data_as_of": { "type": "string", "format": "date-time" },
         "oldest_required_source_as_of": { "type": "string", "format": "date-time" },
         "source_received_at": { "type": "string", "format": "date-time" },
-        "freshness": { "type": "string", "enum": ["FRESH", "STALE"] },
+        "freshness": { "type": "string", "enum": ["FRESH", "STALE", "STALE_FALLBACK"] },
         "freshness_checked_at": { "type": "string", "format": "date-time" },
         "freshness_rule_version": { "type": "string", "maxLength": 16 },
         "cadence": { "const": "EOD" },
         "delivery": { "const": "STATIC" },
-        "quality": { "type": "string", "enum": ["OK", "DEGRADED"] },
+        "quality": { "type": "string", "enum": ["OK", "DEGRADED", "FAILED"] },
         "is_demo": { "type": "boolean" },
         "content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "source": { "type": "string", "minLength": 1, "maxLength": 120 },
@@ -182,7 +218,8 @@
           "type": "string",
           "enum": ["PRE_OPEN", "OPEN", "CLOSED", "POST_CLOSE", "HOLIDAY"]
         },
-        "attribution": { "$ref": "#/$defs/attribution" }
+        "attribution": { "$ref": "#/$defs/attribution" },
+        "source_health": { "$ref": "#/$defs/sourceHealth" }
       }
     }
   }
