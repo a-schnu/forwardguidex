@@ -28,10 +28,12 @@ const MAX_MESSAGES = 24;
 const MAX_MSG_CHARS = 4000;
 const MAX_CONTEXT_CHARS = 4000;
 const MAX_TOKENS = 900;
+// Upstream (OpenRouter) call timeout. Generous because :online web search adds latency.
+const UPSTREAM_TIMEOUT_MS = 45000;
 
 const SYSTEM_PROMPT =
   "Sei l'assistente AI di ForwardGuidex, una piattaforma personale di market intelligence.\n" +
-  "Rispondi SOLO a domande di finanza, mercati, macroeconomia, banche centrali, tassi, valute, " +
+  "Rispondi SOLO a domande di finanza, mercati, aziende, macroeconomia, banche centrali, tassi, valute, " +
   "materie prime, azioni, ETF, criptovalute, earnings e notizie economico-finanziarie.\n" +
   "Se la domanda NON riguarda questi temi, rifiuta in UNA frase gentile e riporta l'utente ai " +
   "mercati, senza rispondere nel merito.\n" +
@@ -39,7 +41,7 @@ const SYSTEM_PROMPT =
   "di prezzo: offri fatti, contesto e spunti da verificare. Non sei un consulente finanziario abilitato.\n" +
   "Usa i DATI DEL CRUSCOTTO qui sotto quando pertinenti e cita i numeri reali. Quando usi la ricerca " +
   "web, cita le fonti con i link.\n" +
-  "Rispondi in ITALIANO, in modo conciso e scannabile: usa **grassetti** ed elenchi puntati. " +
+  "Rispondi in ITALIANO (oppure in base alla lingua di input), in modo conciso e scannabile: usa **grassetti** ed elenchi puntati. " +
   "Niente tabelle o HTML.";
 
 function json(obj, status) {
@@ -58,7 +60,90 @@ function sanitizeMessages(raw) {
     const content = m.content.slice(0, MAX_MSG_CHARS);
     if (content.trim()) out.push({ role: role, content: content });
   }
-  return out;
+  // Collapse any accidental consecutive same-role turns (providers like Anthropic
+  // require strict user/assistant alternation): keep the last of each run.
+  const alt = [];
+  for (const m of out) {
+    if (alt.length && alt[alt.length - 1].role === m.role) alt[alt.length - 1] = m;
+    else alt.push(m);
+  }
+  return alt;
+}
+
+/**
+ * Pull the assistant text out of an OpenRouter completion. Normally
+ * `choices[0].message.content` is a string, but some providers/routes return it
+ * as an array of content blocks ({type:"text", text}) — handle both, and return
+ * "" (never null) so the caller can decide on a fallback.
+ */
+function extractReply(data) {
+  const msg = data && data.choices && data.choices[0] && data.choices[0].message;
+  if (!msg) return "";
+  let content = msg.content;
+  if (Array.isArray(content)) {
+    content = content
+      .map((p) => (p && typeof p.text === "string" ? p.text : typeof p === "string" ? p : ""))
+      .join("");
+  }
+  return typeof content === "string" ? content.trim() : "";
+}
+
+/**
+ * One OpenRouter round-trip. Returns { reply } on a 2xx (reply may be ""), or
+ * { error: Response } for any transport/upstream failure so the caller can just
+ * return it. Extracted so the request can be retried with a different model slug.
+ */
+async function callOpenRouter(request, key, modelSlug, system, messages) {
+  const payload = {
+    model: modelSlug,
+    messages: [{ role: "system", content: system }].concat(messages),
+    max_tokens: MAX_TOKENS,
+    temperature: 0.3,
+  };
+
+  let resp;
+  try {
+    resp = await fetch(OPENROUTER_URL, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + key,
+        "content-type": "application/json",
+        // OpenRouter attribution headers (recommended).
+        "HTTP-Referer": new URL(request.url).origin,
+        "X-Title": "ForwardGuidex",
+      },
+      body: JSON.stringify(payload),
+      // Bound the wait so a hung upstream can't leave the request open forever.
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+  } catch (e) {
+    if (e && (e.name === "TimeoutError" || e.name === "AbortError")) {
+      return { error: json({ error: "Assistente troppo lento. Riprova." }, 504) };
+    }
+    return { error: json({ error: "Assistente irraggiungibile. Riprova." }, 502) };
+  }
+
+  if (!resp.ok) {
+    let detail = "";
+    try {
+      const err = await resp.json();
+      detail = (err && err.error && err.error.message) || "";
+    } catch (_e) {
+      /* ignore */
+    }
+    if (resp.status === 429) {
+      return { error: json({ error: "Assistente occupato (limite richieste). Riprova tra poco." }, 429) };
+    }
+    return { error: json({ error: "Errore dell'assistente" + (detail ? ": " + detail.slice(0, 160) : ".") }, 502) };
+  }
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch (_e) {
+    return { error: json({ error: "Risposta non valida dall'assistente." }, 502) };
+  }
+  return { reply: extractReply(data) };
 }
 
 export async function onRequest(context) {
@@ -82,6 +167,12 @@ export async function onRequest(context) {
     return json({ error: "Origine non consentita." }, 403);
   }
 
+  // Only accept JSON bodies (the widget always sends application/json).
+  const ctype = request.headers.get("content-type") || "";
+  if (ctype.indexOf("application/json") === -1) {
+    return json({ error: "Tipo di contenuto non supportato." }, 415);
+  }
+
   const key = env.OPENROUTER_API_KEY;
   if (!key) {
     return json({ error: "Assistente non configurato (OPENROUTER_API_KEY mancante su Cloudflare Pages)." }, 503);
@@ -92,6 +183,16 @@ export async function onRequest(context) {
     body = await request.json();
   } catch (_e) {
     return json({ error: "Richiesta non valida." }, 400);
+  }
+
+  // Reject any privileged/unknown role (e.g. "system"/"developer"): the client
+  // may only ever send user/assistant turns. Prevents role-based prompt injection.
+  if (Array.isArray(body && body.messages)) {
+    for (const m of body.messages) {
+      if (m && typeof m.role === "string" && m.role !== "user" && m.role !== "assistant") {
+        return json({ error: "Ruolo messaggio non consentito." }, 400);
+      }
+    }
   }
 
   const messages = sanitizeMessages(body && body.messages);
@@ -105,58 +206,26 @@ export async function onRequest(context) {
   // OpenRouter enables web search via the ":online" model suffix; opt out with
   // OPENROUTER_WEB_SEARCH=off.
   const webOff = String(env.OPENROUTER_WEB_SEARCH || "").toLowerCase() === "off";
-  const modelSlug = webOff || model.indexOf(":online") !== -1 ? model : model + ":online";
+  const online = !webOff && model.indexOf(":online") === -1;
+  const primarySlug = online ? model + ":online" : model;
 
   const system =
     SYSTEM_PROMPT +
     (marketContext ? "\n\n=== DATI DEL CRUSCOTTO (usali quando pertinenti) ===\n" + marketContext : "");
 
-  const payload = {
-    model: modelSlug,
-    messages: [{ role: "system", content: system }].concat(messages),
-    max_tokens: MAX_TOKENS,
-    temperature: 0.3,
-  };
+  const primary = await callOpenRouter(request, key, primarySlug, system, messages);
+  if (primary.error) return primary.error;
+  let reply = primary.reply;
 
-  let resp;
-  try {
-    resp = await fetch(OPENROUTER_URL, {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer " + key,
-        "content-type": "application/json",
-        // OpenRouter attribution headers (recommended).
-        "HTTP-Referer": new URL(request.url).origin,
-        "X-Title": "ForwardGuidex",
-      },
-      body: JSON.stringify(payload),
-    });
-  } catch (_e) {
-    return json({ error: "Assistente irraggiungibile. Riprova." }, 502);
+  // Follow-up turns occasionally come back empty from the web-search pass. Rather
+  // than surface "Nessuna risposta generata", retry ONCE without web search — a
+  // plain completion reliably returns text — so the conversation can continue.
+  if (!reply && online) {
+    const fallback = await callOpenRouter(request, key, model, system, messages);
+    if (fallback.error) return fallback.error;
+    reply = fallback.reply;
   }
 
-  if (!resp.ok) {
-    let detail = "";
-    try {
-      const err = await resp.json();
-      detail = (err && err.error && err.error.message) || "";
-    } catch (_e) {
-      /* ignore */
-    }
-    if (resp.status === 429) {
-      return json({ error: "Assistente occupato (limite richieste). Riprova tra poco." }, 429);
-    }
-    return json({ error: "Errore dell'assistente" + (detail ? ": " + detail.slice(0, 160) : ".") }, 502);
-  }
-
-  let data;
-  try {
-    data = await resp.json();
-  } catch (_e) {
-    return json({ error: "Risposta non valida dall'assistente." }, 502);
-  }
-  const msg = data && data.choices && data.choices[0] && data.choices[0].message;
-  const reply = msg ? String(msg.content || "").trim() : "";
   if (!reply) {
     return json({ error: "Nessuna risposta generata." }, 502);
   }

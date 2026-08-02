@@ -1146,11 +1146,27 @@ const CHAT_MAX_TURNS = 12;
 const CHAT_MAX_INPUT = 2000;
 let chatBusy = false;
 
+const CHAT_GREETING =
+  'Ciao! Sono l’**Assistente AI** di ForwardGuidex. ' +
+  'Come posso esserti utile?';
+
 /** Trim the running history to the last CHAT_MAX_TURNS entries. */
 function trimChatHistory() {
   if (chatHistory.length > CHAT_MAX_TURNS) {
     chatHistory.splice(0, chatHistory.length - CHAT_MAX_TURNS);
   }
+}
+
+/**
+ * Reset the conversation to a fresh state: clear the in-memory history AND the
+ * visible log, then show the greeting. Used by "Nuova chat" and on first open.
+ */
+function resetChat() {
+  if (chatBusy) return;
+  chatHistory.length = 0;
+  const log = document.getElementById('chatLog');
+  if (log) log.textContent = '';
+  appendChatMessage('assistant', CHAT_GREETING);
 }
 
 /**
@@ -1314,6 +1330,9 @@ function sendChat() {
         chatHistory.push({ role: 'assistant', content: r.data.reply });
         trimChatHistory();
       } else {
+        // Drop the unanswered user turn so a retry doesn't send two consecutive
+        // user messages (which would break the conversation for every follow-up).
+        if (chatHistory.length && chatHistory[chatHistory.length - 1].role === 'user') chatHistory.pop();
         const err = (r.data && typeof r.data.error === 'string' && r.data.error)
           ? r.data.error
           : 'Si è verificato un errore. Riprova.';
@@ -1321,6 +1340,7 @@ function sendChat() {
       }
     })
     .catch(() => {
+      if (chatHistory.length && chatHistory[chatHistory.length - 1].role === 'user') chatHistory.pop();
       appendChatMessage('system', "Impossibile contattare l'assistente. Controlla la connessione e riprova.");
     })
     .then(done);
@@ -1331,6 +1351,7 @@ function wireChat() {
   const fab = document.getElementById('chatFab');
   const panel = document.getElementById('chatPanel');
   const closeBtn = document.getElementById('chatClose');
+  const newBtn = document.getElementById('chatNew');
   const input = document.getElementById('chatInput');
   const sendBtn = document.getElementById('chatSend');
   if (!fab || !panel) return;
@@ -1339,6 +1360,9 @@ function wireChat() {
     panel.hidden = false;
     fab.classList.add('open');
     fab.setAttribute('aria-expanded', 'true');
+    // Show the greeting the first time the panel is opened in this session.
+    const log = document.getElementById('chatLog');
+    if (log && !log.childNodes.length) appendChatMessage('assistant', CHAT_GREETING);
     if (input) { autoGrowChatInput(input); input.focus(); }
   };
   const closeChat = (returnFocus) => {
@@ -1350,6 +1374,7 @@ function wireChat() {
 
   fab.addEventListener('click', () => { if (panel.hidden) openChat(); else closeChat(false); });
   if (closeBtn) closeBtn.addEventListener('click', () => closeChat(true));
+  if (newBtn) newBtn.addEventListener('click', () => { resetChat(); if (input) input.focus(); });
   if (sendBtn) sendBtn.addEventListener('click', sendChat);
 
   if (input) {

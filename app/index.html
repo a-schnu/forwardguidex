@@ -176,8 +176,21 @@
 <!-- floating AI chat widget -->
 <button class="chat-fab" id="chatFab" type="button" aria-label="Assistente AI" aria-expanded="false" aria-controls="chatPanel">
   <svg class="chat-ic" viewBox="0 0 24 24" aria-hidden="true">
-    <path class="chat-ic-spark" d="M13 2 L15 8.6 L21.5 11 L15 13.4 L13 20 L11 13.4 L4.5 11 L11 8.6 Z"/>
-    <path class="chat-ic-spark2" d="M18.5 3 L19.4 5.6 L22 6.5 L19.4 7.4 L18.5 10 L17.6 7.4 L15 6.5 L17.6 5.6 Z"/>
+    <g class="chat-ic-arm">
+      <path d="M6.3 13 Q4.7 15 5 16.9 Q5.15 18.2 4.3 19.1"/>
+      <path d="M9 13.3 Q8.1 15.4 8.6 17.4 Q8.9 18.8 7.9 19.8"/>
+      <path d="M12 13.5 Q11.5 15.6 12 17.7 Q12.4 19.2 11.7 20.4"/>
+      <path d="M15 13.3 Q15.9 15.4 15.4 17.4 Q15.1 18.8 16.1 19.8"/>
+      <path d="M17.7 13 Q19.3 15 19 16.9 Q18.85 18.2 19.7 19.1"/>
+    </g>
+    <path class="chat-ic-spark" d="M12 2.5C17 2.5 20.2 5.6 20.2 9.8C20.2 12.6 18 13.5 12 13.5C6 13.5 3.8 12.6 3.8 9.8C3.8 5.6 7 2.5 12 2.5Z"/>
+    <circle class="chat-ic-eyew" cx="9.4" cy="8.2" r="2.1"/>
+    <circle class="chat-ic-eyew" cx="14.6" cy="8.2" r="2.1"/>
+    <circle class="chat-ic-eye" cx="9.75" cy="8.6" r="1.1"/>
+    <circle class="chat-ic-eye" cx="14.25" cy="8.6" r="1.1"/>
+    <circle class="chat-ic-eyew" cx="9.35" cy="8.05" r=".5"/>
+    <circle class="chat-ic-eyew" cx="13.85" cy="8.05" r=".5"/>
+    <path class="chat-ic-smile" d="M10.2 11.4 Q12 12.9 13.8 11.4"/>
   </svg>
   <span class="chat-x" aria-hidden="true">×</span>
 </button>
@@ -185,10 +198,15 @@
 <div class="chat-panel" id="chatPanel" role="dialog" aria-label="Assistente AI" hidden>
   <div class="chat-head">
     <div class="chat-head-l">
-      <div class="chat-title">Assistente</div>
-      <div class="chat-sub muted">Solo finanza e mercati</div>
+      <div class="chat-title">Assistente AI</div>
+      <div class="chat-sub muted">Esperto di finanza e mercati</div>
     </div>
-    <button class="chat-close" id="chatClose" type="button" aria-label="Chiudi assistente">×</button>
+    <div class="chat-head-actions">
+      <button class="chat-new" id="chatNew" type="button" aria-label="Nuova chat" title="Nuova chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 1 2.3 5.6" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/><path d="M4 8.5V12H7.5" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="chat-close" id="chatClose" type="button" aria-label="Chiudi assistente">×</button>
+    </div>
   </div>
   <div class="chat-log" id="chatLog" role="log" aria-live="polite"></div>
   <div class="chat-input-row">
