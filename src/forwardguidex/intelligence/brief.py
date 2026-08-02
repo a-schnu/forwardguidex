@@ -10,13 +10,17 @@ from ..transform import marts
 from .llm import chat
 
 SYSTEM = (
-    "You are ForwardGuidex, a market-intelligence analyst. Write a concise, "
-    "structured pre-open Morning Brief for a retail investor with a DUAL horizon: "
+    "You are ForwardGuidex, a sharp market-intelligence analyst. Write a crisp, "
+    "scannable pre-open Morning Brief for a retail investor with a DUAL horizon: "
     "(a) active leveraged long/short trading AND (b) long-term buy-and-hold "
-    "investing, both in stocks and ETFs. Address both horizons where relevant. "
-    "Be factual and data-driven. Never give personalized buy/sell advice or price "
-    "targets - surface facts, moves and context, and flag what to watch. Use short "
-    "Markdown sections."
+    "investing — across global equities (US, Europe, Asia), ETFs, rates and crypto. "
+    "Address both horizons where relevant. Be factual, specific and data-driven: "
+    "cite the actual moves and levels from the data. Never give personalized "
+    "buy/sell advice or price targets — surface facts, moves and context, and flag "
+    "what to watch. FORMAT: use short Markdown '##' section headings, **bold** for "
+    "key figures/tickers, and tight bullet lists. Do NOT use tables, images or HTML "
+    "(the renderer strips them); headings, bold/italic, bullets and blockquotes only. "
+    "Write the ENTIRE brief in ITALIAN."
 )
 
 
@@ -40,6 +44,14 @@ def build_context(con) -> str:
     parts = ["## MARKET SNAPSHOT"]
     if not lat.empty:
         parts.append(_fmt_movers(lat))
+        idx = lat[lat["role"] == "index"].dropna(subset=["ret_1d"])
+        if not idx.empty:
+            parts.append("\n## INDICES (1d %)\n" + "\n".join(
+                f"- {r.name or r.ticker}: {r.ret_1d:+.2f}%" for r in idx.itertuples()))
+        cry = lat[lat["role"] == "crypto"].dropna(subset=["ret_1d"])
+        if not cry.empty:
+            parts.append("\n## CRYPTO (1d %)\n" + "\n".join(
+                f"- {r.name or r.ticker}: {r.ret_1d:+.2f}% -> {r.last_close:.2f}" for r in cry.itertuples()))
     if not sec.empty:
         parts.append("\n## SECTORS (avg 1d %)\n" + "\n".join(
             f"- {r.sector_label}: {r.avg_ret_1d:+.2f}%" for r in sec.itertuples()))
@@ -55,12 +67,18 @@ def build_context(con) -> str:
 def build_brief(con, save: bool = True) -> str:
     context = build_context(con)
     user = (
-        "Write today's Morning Brief from this data. Structure: "
-        "1) TL;DR (2-3 bullets), 2) Cross-asset read, 3) Sector watch "
-        "(oil & gas, defense, staples, software, semis, industrials), "
-        "4) Rates & macro, 5) What to watch today - split into "
-        "'Short-term trade triggers' and 'Long-term investment signals'. "
-        "Keep under 500 words.\n\n"
+        "Write today's Morning Brief from this data, entirely in ITALIAN. Open with "
+        "ONE bold line: a market-regime read (Risk-on / Risk-off / Mixed) plus a "
+        "one-clause reason. Then EXACTLY these two '##' sections with these Italian "
+        "headings:\n"
+        "## Sintesi del giorno - 4-6 bullets that synthesise the day: the main index "
+        "moves (USA / Europa / Asia), the best and worst sectors, rates and central "
+        "banks, and any standout single-stock or crypto move. Cite the actual "
+        "figures from the data.\n"
+        "## Cosa tenere d'occhio - split into '**Breve termine (trading)**' and "
+        "'**Lungo termine (investimento)**', 2-3 bullets each.\n"
+        "Do NOT add a cross-asset section or any other section. Keep it tight and "
+        "scannable, under ~450 words.\n\n"
         f"DATA:\n{context}"
     )
     body = chat([{"role": "system", "content": SYSTEM},

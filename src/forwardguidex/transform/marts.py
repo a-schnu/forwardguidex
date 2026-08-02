@@ -67,7 +67,7 @@ def latest(con) -> pd.DataFrame:
         return pd.DataFrame()
     return con.execute(
         """
-        SELECT g.ticker, d.name, d.role, d.sector_label,
+        SELECT g.ticker, d.name, d.ccy, d.role, d.sector_label,
                g.last_close, g.ret_1d, g.ret_5d, g.last_date
         FROM gold_latest g LEFT JOIN dim_ticker d USING (ticker)
         ORDER BY g.ret_1d DESC NULLS LAST

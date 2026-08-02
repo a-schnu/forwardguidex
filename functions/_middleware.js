@@ -1,9 +1,19 @@
 /**
  * ForwardGuidex dashboard — password gate (Cloudflare Pages Function).
  *
- * Runs before every request to the Pages project. Requires HTTP Basic Auth;
- * the password is read from the DASHBOARD_PASSWORD environment variable set on
- * the Pages project (Settings -> Variables and Secrets -> Production).
+ * LOCATION MATTERS: this file MUST live in the repo-root `functions/` directory,
+ * NOT inside the deployed static root (`app/`). The daily/deploy workflows run
+ * `wrangler pages deploy app` from the repo root, and wrangler compiles Functions
+ * from `<cwd>/functions` — a `functions/` dir *inside* the assets directory is
+ * ignored and served as a static file, which silently disables the gate and
+ * publishes the dashboard. (See Cloudflare Pages docs: "the /functions directory
+ * must be at the root of your Pages project, not in the static root such as
+ * /dist".) The smoke tests assert an UNauthenticated request returns 401 so this
+ * can never regress unnoticed.
+ *
+ * Runs before every request to the Pages project. Requires HTTP Basic Auth; the
+ * password is read from the DASHBOARD_PASSWORD environment variable set on the
+ * Pages project (Settings -> Variables and Secrets -> Production).
  *
  * Fails CLOSED: if DASHBOARD_PASSWORD is unset, every request is denied (503) —
  * the dashboard is never served publicly. Any username is accepted; only the

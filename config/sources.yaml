@@ -36,7 +36,7 @@ sources:
     attribution_required: true
     attribution_file: "legal/us-treasury.txt"   # placeholder; NY Fed uses disclaimer_file below
     disclaimer_required: true
-    disclaimer_version: "2026-08-01"
+    disclaimer_version: "2026-08-02"
     disclaimer_file: "legal/nyfed-reference-rates.txt"
     reviewed_at: "2026-08-01"
     review_expires_at: "2027-08-01"
@@ -58,3 +58,14 @@ sources:
     attribution_required: false
     reviewed_at: "2026-08-01"
     review_expires_at: "2027-08-01"
+  bis:
+    approval_status: approved
+    rights_basis: "BIS statistics — free use for non-commercial purposes with attribution (private/personal deployment)"
+    evidence_reference: "BIS_REVIEW_2026_08"
+    source_page: "BIS central bank policy rates (WS_CBPOL)"
+    allowed_modes: [LOCAL_DEMO, PRIVATE_PERSONAL]
+    allowed_uses: [persistence, ai_input, private_dashboard, private_telegram]
+    attribution_required: true
+    attribution_file: "legal/bis-policy-rates.txt"
+    reviewed_at: "2026-08-02"
+    review_expires_at: "2027-08-02"

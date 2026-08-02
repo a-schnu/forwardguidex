@@ -26,6 +26,8 @@ _SOURCE_KEY = {
     "us_treasury": "us_treasury",
     "NYFED": "ny_fed",
     "ny_fed": "ny_fed",
+    "BIS": "bis",
+    "bis": "bis",
     "GDELT": "gdelt",
     "gdelt": "gdelt",
 }
@@ -71,7 +73,7 @@ def sources_in_snapshot(snapshot: dict) -> set[str]:
         if k:
             keys.add(k)
 
-    for section in ("indices", "futures"):
+    for section in ("indices", "futures", "etfs", "crypto"):
         for item in snapshot.get(section, []) or []:
             add(item.get("source"))
     for sec in snapshot.get("sectors", []) or []:
@@ -188,6 +190,10 @@ def attribution_block(source_keys: set[str], policy: dict | None = None) -> dict
         spec = sources.get("ny_fed", {})
         f = spec.get("disclaimer_file", "legal/nyfed-reference-rates.txt")
         out["ny_fed"] = _read_notice(f)
+    if "bis" in source_keys:
+        spec = sources.get("bis", {})
+        f = spec.get("attribution_file", "legal/bis-policy-rates.txt")
+        out["bis"] = _read_notice(f)
     return out
 
 

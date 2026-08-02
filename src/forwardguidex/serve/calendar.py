@@ -159,6 +159,8 @@ def collect_as_of(snapshot: dict) -> dict[str, list]:
     out: dict[str, list] = {k: [] for k in RULES}
     for item in snapshot.get("indices", []) or []:
         out["equities"].append(item.get("as_of"))
+    for item in snapshot.get("etfs", []) or []:
+        out["equities"].append(item.get("as_of"))
     for sec in snapshot.get("sectors", []) or []:
         for item in (sec.get("etfs", []) or []) + (sec.get("constituents", []) or []):
             out["equities"].append(item.get("as_of"))

@@ -1,16 +1,4 @@
-[[REPLACE-WITH-OFFICIAL-NYFED-DISCLAIMER]]
-
-ACTION REQUIRED (owner): the text below is an INTERIM placeholder. Before this
-notice is shown on any public surface, replace this entire file with the exact,
-verbatim reference-rate disclaimer from the Federal Reserve Bank of New York
-Terms of Use — do not paraphrase, summarize, or let an LLM rewrite it. Then bump
-`disclaimer_version` in config/sources.yaml and remove the sentinel line above.
-
-Official source: Federal Reserve Bank of New York — Terms of Use for reference
-rates (EFFR, SOFR): https://www.newyorkfed.org/markets/reference-rates/terms-of-use
-
---- interim placeholder (PRIVATE_PERSONAL / owner-only) ---
-The New York Fed publishes the EFFR and SOFR reference rates. The New York Fed
-is not responsible for and does not endorse this product; the reference rates
-are provided subject to the New York Fed's Terms of Use, and this application is
-not affiliated with or approved by the Federal Reserve Bank of New York.
+The EFFR and SOFR data is subject to the Terms of Use posted at newyorkfed.org.
+The New York Fed is not responsible for publication of the EFFR and SOFR data by
+ForwardGuidex, does not sanction or endorse any particular republication, and has
+no liability for your use.

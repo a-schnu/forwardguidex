@@ -130,8 +130,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PYEOF' | tee smoke-test.log
-          import base64, hashlib, json, os, sys, urllib.error, urllib.request
-          # Verify the exact prod bytes staged into app/data/ (what wrangler uploaded).
+          import base64, hashlib, json, os, sys, time, urllib.error, urllib.request
+          # --- 1) Verify the exact prod bytes staged into app/data/ (what wrangler uploaded). ---
           manifest = json.load(open("app/data/latest.json"))
           expected = manifest["artifact_sha256"]
           snap_file = os.path.join("app/data", manifest["snapshot"])
@@ -148,19 +148,51 @@ jobs:
           if not meta.get("freshness") or not meta.get("quality"):
               sys.exit("::error::freshness/quality missing.")
           print(f"OK: staged prod artifact verified (sha256 ok, schema_version=1, is_demo=false, freshness={meta.get('freshness')}, quality={meta.get('quality')}).")
-          # Best-effort live check (Cloudflare may 403 the CI datacenter IP -> warning only).
+          # --- 2) Live password-gate verification (the dashboard MUST NOT be publicly readable). ---
+          # The gate is a Cloudflare Pages Function (functions/_middleware.js at the REPO ROOT).
+          # If it is not running, an UNauthenticated request returns 200 and the dashboard is
+          # public — a hard failure that rolls the deploy back. Cloudflare may 403 the CI
+          # datacenter IP (an edge block, independent of our gate); that case is inconclusive
+          # -> warning only, so we never turn a real public exposure into a false pass.
           host = os.environ["APP_HOST"].rstrip("/")
           ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-          auth = "Basic " + base64.b64encode(("ci:" + os.environ["DASHBOARD_PASSWORD"]).encode()).decode()
-          try:
-              req = urllib.request.Request(host + "/", headers={"Authorization": auth, "User-Agent": ua})
-              with urllib.request.urlopen(req, timeout=20) as r:
-                  print(f"OK: live GET / -> {r.status}.")
-          except urllib.error.HTTPError as e:
-              print(f"::warning::Live GET / -> HTTP {e.code} (Cloudflare likely blocks the CI IP; verify in a browser). Not failing.")
-          except Exception as e:
-              print(f"::warning::Live check skipped: {e}. Not failing.")
-          print("SMOKE PASSED (staged-artifact verification).")
+          good_auth = "Basic " + base64.b64encode(("ci:" + os.environ["DASHBOARD_PASSWORD"]).encode()).decode()
+          def probe(auth):
+              headers = {"User-Agent": ua, "Cache-Control": "no-cache"}
+              if auth:
+                  headers["Authorization"] = auth
+              req = urllib.request.Request(f"{host}/?_smoke={int(time.time()*1000)}", headers=headers)
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      return r.status, r.headers
+              except urllib.error.HTTPError as e:
+                  return e.code, e.headers
+              except Exception:
+                  return None, None
+          # 2a) No credentials -> must be challenged (401), never served (200) or 503 (misconfig).
+          status, hdrs = probe(None)
+          if status == 200:
+              sys.exit("::error::SECURITY: unauthenticated GET / returned 200 — the password gate is NOT enforced and the dashboard is PUBLIC. The Pages Function (functions/_middleware.js) is not running. Refusing (rollback).")
+          if status == 503:
+              sys.exit("::error::unauthenticated GET / returned 503 — the gate Function runs but DASHBOARD_PASSWORD is not set on the Cloudflare Pages project (Settings -> Variables and Secrets -> Production). Refusing (rollback).")
+          if status == 401:
+              chal = (hdrs.get("WWW-Authenticate") if hdrs else None) or ""
+              print(f"OK: unauthenticated GET / -> 401 (gate enforced; WWW-Authenticate={chal!r}).")
+          elif status == 403:
+              print("::warning::unauthenticated GET / -> 403 (Cloudflare edge likely blocked the CI IP; cannot verify the gate from CI — verify in a browser). Not failing.")
+          else:
+              print(f"::warning::unauthenticated GET / -> {status} (unexpected/unreachable; verify in a browser). Not failing.")
+          # 2b) With the correct password -> must be admitted (200).
+          status, _ = probe(good_auth)
+          if status == 200:
+              print("OK: authenticated GET / -> 200 (correct password admitted).")
+          elif status == 401:
+              sys.exit("::error::authenticated GET / -> 401 — the correct DASHBOARD_PASSWORD was rejected; the CI secret and the Pages project secret disagree. Refusing (rollback).")
+          elif status == 403:
+              print("::warning::authenticated GET / -> 403 (Cloudflare edge likely blocked the CI IP). Not failing.")
+          else:
+              print(f"::warning::authenticated GET / -> {status} (unexpected/unreachable). Not failing.")
+          print("SMOKE PASSED (staged artifact + password-gate verification).")
           PYEOF
       - name: Upload smoke test log
         if: always()
@@ -249,7 +281,7 @@ jobs:
       - name: Alert — smoke test failed, rollback performed
         if: always() && steps.smoke.outcome == 'failure'
         run: |
-          echo "::error::Daily deploy smoke test FAILED for app.forwardguidex.com. Rolled back to the previous successful Cloudflare Pages deployment (id: ${{ steps.pre.outputs.deployment_id }}). The freshly built snapshot was NOT archived to Firestore (publish job is skipped when this job fails). See the smoke-test-log-${{ github.run_id }}-${{ github.run_attempt }} artifact for details. This job is intentionally failing so GitHub surfaces a run failure as the alert; wire a dedicated channel (Slack/email/PagerDuty webhook) here if stronger paging is needed."
+          echo "::error::Daily deploy smoke test FAILED for ${APP_HOST}. Rolled back to the previous successful Cloudflare Pages deployment (id: ${{ steps.pre.outputs.deployment_id }}). The freshly built snapshot was NOT archived to Firestore (publish job is skipped when this job fails). See the smoke-test-log-${{ github.run_id }}-${{ github.run_attempt }} artifact for details. This job is intentionally failing so GitHub surfaces a run failure as the alert; wire a dedicated channel (Slack/email/PagerDuty webhook) here if stronger paging is needed."
           exit 1
 
       - name: Upload validated snapshot for the publish job

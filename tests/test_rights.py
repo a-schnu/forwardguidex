@@ -76,3 +76,39 @@ def test_attribution_block():
     att = rights.attribution_block({"us_treasury", "ny_fed"})
     assert att["us_treasury"].startswith("Source: U.S. Department")
     assert att["ny_fed"]  # non-empty disclaimer text
+    assert "bis" not in att  # only present when BIS data is in the snapshot
+
+
+def test_bis_attribution_block():
+    att = rights.attribution_block({"bis"})
+    assert att["bis"].startswith("Source: Bank for International Settlements")
+
+
+def test_nyfed_disclaimer_is_verbatim():
+    # the sentinel/scaffolding must be gone, replaced with the real notice
+    txt = rights.nyfed_disclaimer()
+    assert "[[REPLACE" not in txt and "ACTION REQUIRED" not in txt
+    assert txt.startswith("The EFFR and SOFR data is subject to the Terms of Use")
+
+
+@pytest.fixture
+def snap_bis():
+    return {
+        "indices": [{"ticker": "^GSPC", "source": "yfinance"}],
+        "etfs": [{"ticker": "ILF", "source": "yfinance"}],
+        "rates": [{"series_id": "BOEBR", "source": "BIS"}],
+    }
+
+
+def test_bis_source_detected(snap_bis):
+    assert "bis" in rights.sources_in_snapshot(snap_bis)
+
+
+def test_bis_private_personal_passes(snap_bis):
+    assert rights.enforce("PRIVATE_PERSONAL", snapshot=snap_bis) == []
+
+
+def test_bis_public_rejected(snap_bis):
+    # BIS is private/personal only -> any PUBLIC_* mode must reject
+    v = rights.enforce("PUBLIC_NONCOMMERCIAL", snapshot=snap_bis)
+    assert any(x.source == "bis" for x in v)
