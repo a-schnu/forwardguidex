@@ -785,22 +785,44 @@ function ratesGroup(label, rates) {
   return group;
 }
 
+/**
+ * Central-bank decisions group for the rates section. Reuses the .cbev/.cbev-grid
+ * card markup (via cbEventCard) inside a labelled .rates-group. The grid carries
+ * [data-viz] so the shared IntersectionObserver runs its count-up on scroll-in.
+ */
+function cbDecisionsGroup(events) {
+  const group = el('div', 'rates-group');
+  group.appendChild(el('div', 'kpi-group-label', 'Banche centrali · Decisioni sui tassi'));
+  const grid = el('div', 'cbev-grid');
+  grid.setAttribute('data-viz', '');
+  events.forEach((ev) => grid.appendChild(cbEventCard(ev)));
+  group.appendChild(grid);
+  return group;
+}
+
 function renderRates(snapshot) {
   const host = document.getElementById('ratesStrip');
   host.textContent = '';
   const rates = Array.isArray(snapshot.rates) ? snapshot.rates : [];
   renderYieldCurve(rates);
-  // Central-bank policy rates arrive via the BIS source; keep them visually
-  // separated from Treasury/reference rates when both are present.
-  const isCentralBank = (r) => String(r.source || '').toUpperCase() === 'BIS';
-  const cb = rates.filter(isCentralBank);
-  const other = rates.filter((r) => !isCentralBank(r));
 
-  if (cb.length && other.length) {
+  // Central-bank policy rates are shown as decision cards from snapshot.cb_events;
+  // the plain BIS rate chips are dropped from the Treasury/reference group to avoid
+  // duplicating the same central banks.
+  const isCentralBank = (r) => String(r.source || '').toUpperCase() === 'BIS';
+  const other = rates.filter((r) => !isCentralBank(r));
+  const cbEvents = Array.isArray(snapshot.cb_events) ? snapshot.cb_events : [];
+
+  if (cbEvents.length) {
     host.classList.add('rates-grouped');
-    host.appendChild(ratesGroup('Treasury & riferimento', other));
-    host.appendChild(ratesGroup('Banche centrali', cb));
+    if (other.length) host.appendChild(ratesGroup('Treasury & riferimento', other));
+    host.appendChild(cbDecisionsGroup(cbEvents));
+  } else if (other.length) {
+    // No central-bank decisions: just the Treasury/reference chips, flat.
+    host.classList.remove('rates-grouped');
+    other.forEach((r) => host.appendChild(rateChip(r)));
   } else {
+    // Nothing but (possibly) BIS rates: fall back to showing everything flat.
     host.classList.remove('rates-grouped');
     rates.forEach((r) => host.appendChild(rateChip(r)));
   }
@@ -854,37 +876,32 @@ function renderMovers(snapshot) {
 
 /* ---------- central-bank decisions (cb_events) ---------- */
 
-function renderCbEvents(snapshot) {
-  const host = document.getElementById('cbEventsGrid');
-  const section = document.getElementById('cbevents');
-  if (!host) return;
-  host.textContent = '';
-  const events = Array.isArray(snapshot.cb_events) ? snapshot.cb_events : [];
-  if (!events.length) { if (section) section.hidden = true; return; }
-  if (section) section.hidden = false;
+/**
+ * Build one central-bank decision card (.cbev). Used inside the rates section
+ * (via cbDecisionsGroup) — bank name, policy rate, a colour-coded decision chip
+ * (Rialzo/Taglio/Invariato) and the effective date when present.
+ */
+function cbEventCard(ev) {
+  const card = el('div', 'cbev glass');
+  card.appendChild(el('div', 'cbev-bank', ev.bank));
 
-  events.forEach((ev) => {
-    const card = el('div', 'cbev glass');
-    card.appendChild(el('div', 'cbev-bank', ev.bank));
+  const hasRate = typeof ev.rate === 'number' && Number.isFinite(ev.rate);
+  const rateWrap = el('div', 'cbev-rate');
+  const rateVal = el('span', 'cbev-rate-val', hasRate ? fmtNum(ev.rate) + '%' : '—');
+  if (hasRate) markCountUp(rateVal, ev.rate, 'pctval');
+  rateWrap.appendChild(rateVal);
+  card.appendChild(rateWrap);
 
-    const hasRate = typeof ev.rate === 'number' && Number.isFinite(ev.rate);
-    const rateWrap = el('div', 'cbev-rate');
-    const rateVal = el('span', 'cbev-rate-val', hasRate ? fmtNum(ev.rate) + '%' : '—');
-    if (hasRate) markCountUp(rateVal, ev.rate, 'pctval');
-    rateWrap.appendChild(rateVal);
-    card.appendChild(rateWrap);
+  const bp = Math.abs(Number.isFinite(ev.change_bp) ? ev.change_bp : 0);
+  let chipText;
+  if (ev.direction === 'hike') chipText = 'Rialzo +' + bp + 'bp';
+  else if (ev.direction === 'cut') chipText = 'Taglio −' + bp + 'bp';
+  else chipText = 'Invariato';
+  card.appendChild(el('div', 'cbev-chip ' + signClass(ev.change_bp), chipText));
 
-    const bp = Math.abs(Number.isFinite(ev.change_bp) ? ev.change_bp : 0);
-    let chipText;
-    if (ev.direction === 'hike') chipText = 'Rialzo +' + bp + 'bp';
-    else if (ev.direction === 'cut') chipText = 'Taglio −' + bp + 'bp';
-    else chipText = 'Invariato';
-    card.appendChild(el('div', 'cbev-chip ' + signClass(ev.change_bp), chipText));
+  if (ev.as_of) card.appendChild(el('div', 'cbev-asof muted', 'dal ' + fmtDate(ev.as_of)));
 
-    if (ev.as_of) card.appendChild(el('div', 'cbev-asof muted', 'dal ' + fmtDate(ev.as_of)));
-
-    host.appendChild(card);
-  });
+  return card;
 }
 
 /* ---------- upcoming earnings ---------- */
@@ -918,7 +935,8 @@ function renderTriggers(snapshot) {
   const section = document.getElementById('triggers');
   if (!host) return;
   host.textContent = '';
-  const items = Array.isArray(snapshot.triggers) ? snapshot.triggers : [];
+  // Show at most the first 5 catalysts.
+  const items = (Array.isArray(snapshot.triggers) ? snapshot.triggers : []).slice(0, 5);
   if (!items.length) { if (section) section.hidden = true; return; }
   if (section) section.hidden = false;
 
@@ -1075,6 +1093,19 @@ function wireModal() {
   window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay.classList.contains('open')) closeModal(); });
 }
 
+/* ---------- Morning Brief expand/collapse (once) ---------- */
+
+/** Wire the Morning Brief card's toggle: flip `.open` on the card + aria-expanded. */
+function wireBrief() {
+  const card = document.getElementById('briefCard');
+  const btn = document.getElementById('briefToggle');
+  if (!card || !btn) return;
+  btn.addEventListener('click', () => {
+    const open = card.classList.toggle('open');
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+}
+
 /* ---------- reveal-on-scroll + blob parallax (cosmetic) ---------- */
 
 function wireCosmetics() {
@@ -1117,16 +1148,18 @@ async function main() {
 
   const snapshot = result.snapshot;
   try {
+    // Render order follows the on-page section order for clarity; every renderer
+    // targets elements by id so the actual ordering is fixed by the markup.
     renderTopBar(snapshot.meta);
     renderOverview(snapshot);
-    renderSectors(snapshot);
-    renderRates(snapshot);
+    renderBrief(snapshot);   // Morning Brief now lives beside the Overview heading
+    wireBrief();
     renderMovers(snapshot);
-    renderCbEvents(snapshot);
+    renderSectors(snapshot);
+    renderRates(snapshot);   // also renders the central-bank decision cards
     renderEarnings(snapshot);
     renderTriggers(snapshot);
     renderHeadlines(snapshot);
-    renderBrief(snapshot);
     renderFooter(snapshot.meta);
     wireCosmetics();
     wireViz();

@@ -22,17 +22,49 @@
 
 <main id="dashboard">
 
-  <section class="block first">
+  <section class="block first" id="overview">
     <div class="wrap">
-      <div class="head reveal">
-        <div class="eyebrow">Overview</div>
-        <h2>Mercati in sintesi</h2>
-        <p>Lo stato dei principali mercati globali: indici, futures, ETF e criptovalute.</p>
+      <div class="ov-top">
+        <div class="head reveal">
+          <div class="eyebrow">Overview</div>
+          <h2>Mercati in sintesi</h2>
+          <p>Lo stato dei principali mercati globali: indici, futures, ETF e criptovalute.</p>
+        </div>
+        <div class="brief-card glass reveal" id="briefCard">
+          <button class="brief-toggle" id="briefToggle" type="button" aria-expanded="false" aria-controls="briefBody">
+            <span class="brief-toggle-l">
+              <span class="eyebrow">Morning Brief</span>
+              <span class="when muted" id="briefWhen"></span>
+            </span>
+            <span class="brief-caret" aria-hidden="true">▾</span>
+          </button>
+          <div class="brief-body" id="briefBody"></div>
+        </div>
       </div>
       <div class="ov-tabs reveal">
         <div class="tablist" role="tablist" aria-label="Classi di attività" id="ovTablist"></div>
         <p class="tab-desc muted" id="ovTabDesc"></p>
         <div class="ov-panels" id="ovPanels"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="movers">
+    <div class="wrap">
+      <div class="head reveal">
+        <div class="eyebrow">Movimenti</div>
+        <h2>Chi sale, chi scende</h2>
+        <p>I titoli che salgono e scendono di più nella giornata.</p>
+      </div>
+      <div class="movers reveal">
+        <div class="mv-col glass">
+          <h4 class="mv-h up">Gainers</h4>
+          <div id="moversGainers"></div>
+        </div>
+        <div class="mv-col glass">
+          <h4 class="mv-h down">Losers</h4>
+          <div id="moversLosers"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -57,7 +89,7 @@
       <div class="head reveal">
         <div class="eyebrow">Tassi</div>
         <h2>Curva Treasury &amp; tassi di riferimento</h2>
-        <p>Curva dei rendimenti dei Treasury USA e tassi guida delle principali banche centrali.</p>
+        <p>Curva dei rendimenti dei Treasury USA e le ultime decisioni delle principali banche centrali.</p>
       </div>
       <div class="yc-wrap glass reveal" id="yieldCurveWrap" data-viz hidden>
         <div class="yc-head">
@@ -70,37 +102,6 @@
         </div>
       </div>
       <div class="rates-strip" id="ratesStrip"></div>
-    </div>
-  </section>
-
-  <section class="block" id="movers">
-    <div class="wrap">
-      <div class="head reveal">
-        <div class="eyebrow">Movimenti</div>
-        <h2>Chi sale, chi scende</h2>
-        <p>I titoli che salgono e scendono di più nella giornata.</p>
-      </div>
-      <div class="movers reveal">
-        <div class="mv-col glass">
-          <h4 class="mv-h up">Gainers</h4>
-          <div id="moversGainers"></div>
-        </div>
-        <div class="mv-col glass">
-          <h4 class="mv-h down">Losers</h4>
-          <div id="moversLosers"></div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section class="block" id="cbevents">
-    <div class="wrap">
-      <div class="head reveal">
-        <div class="eyebrow">Banche centrali</div>
-        <h2>Decisioni sui tassi</h2>
-        <p>L'ultima mossa di politica monetaria delle principali banche centrali.</p>
-      </div>
-      <div class="cbev-grid reveal" id="cbEventsGrid" data-viz></div>
     </div>
   </section>
 
@@ -134,20 +135,6 @@
         <p>Titoli di giornata che possono muovere i mercati nel breve termine.</p>
       </div>
       <div class="headlines" id="headlines"></div>
-    </div>
-  </section>
-
-  <section class="block" id="brief">
-    <div class="wrap">
-      <div class="head reveal">
-        <div class="eyebrow">Morning Brief</div>
-        <h2>La lettura di oggi</h2>
-        <p>La sintesi del giorno e cosa tenere d'occhio.</p>
-      </div>
-      <div class="brief glass reveal">
-        <div class="when" id="briefWhen"></div>
-        <div class="brief-body" id="briefBody"></div>
-      </div>
     </div>
   </section>
 

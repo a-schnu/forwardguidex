@@ -299,15 +299,23 @@ cb_policy_rates:
   - {series_id: "BOJPR",     name: "BoJ Policy Rate",           area: "JP", bank: "BoJ"}
   - {series_id: "PBOCLPR1Y", name: "PBoC Loan Prime Rate 1Y",   area: "CN", bank: "PBoC"}
 
-# GDELT DOC 2.0 free news/geopolitics queries. The tariffs/policy/geopolitics
-# queries below are the compliant "catalysts" news feed (X/Twitter has no free API;
-# executive orders come from the Federal Register, corporate events from SEC EDGAR).
+# GDELT DOC 2.0 free news queries. `macro: true` queries are MACROECONOMIC /
+# FINANCIAL and are the only ones surfaced in the "Notizie del giorno" section
+# (serve/snapshot.py filters headlines to these topics). `macro: false` queries are
+# geopolitical context: fed to the LLM Morning Brief for regime awareness but NOT
+# shown as news, to keep the news feed strictly macro/financial. (Executive orders
+# come from the Federal Register + corporate events from SEC EDGAR — the triggers
+# section — since X/Twitter has no free API.)
 gdelt_queries:
-  - {key: "iran",     query: "Iran (oil OR military OR sanctions OR strike)"}
-  - {key: "fed",      query: "Federal Reserve (interest rate OR inflation)"}
-  - {key: "ecb",      query: "European Central Bank rate"}
-  - {key: "oil",      query: "OPEC OR crude oil price"}
-  - {key: "semis",    query: "semiconductor (export controls OR chips OR Nvidia OR TSMC)"}
-  - {key: "defense",  query: "defense spending OR military conflict"}
-  - {key: "tariffs",  query: "tariff (trade OR imports OR China OR EU)"}
-  - {key: "policy",   query: "White House (executive order OR sanctions OR tariff)"}
+  # --- macro / financial (shown in Notizie) ---
+  - {key: "fed",        macro: true,  query: "Federal Reserve (interest rate OR rate cut OR inflation)"}
+  - {key: "bce",        macro: true,  query: "European Central Bank (interest rate OR inflation)"}
+  - {key: "inflazione", macro: true,  query: "inflation (CPI OR consumer prices) (United States OR euro area)"}
+  - {key: "lavoro",     macro: true,  query: "(nonfarm payrolls OR unemployment rate OR jobs report)"}
+  - {key: "petrolio",   macro: true,  query: "(crude oil price OR OPEC OR Brent)"}
+  - {key: "dazi",       macro: true,  query: "tariff (trade OR imports OR China OR European Union)"}
+  - {key: "mercati",    macro: true,  query: "(stock market OR S&P 500 OR Wall Street) (earnings OR selloff OR rally)"}
+  - {key: "semis",      macro: true,  query: "semiconductor (chips OR Nvidia OR TSMC OR export controls)"}
+  # --- geopolitics: brief context only, NOT shown in Notizie ---
+  - {key: "geopolitica", macro: false, query: "(Iran OR Middle East OR Ukraine) (oil OR sanctions OR conflict)"}
+  - {key: "difesa",      macro: false, query: "defense spending OR military conflict"}
