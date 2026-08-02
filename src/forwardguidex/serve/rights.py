@@ -30,6 +30,10 @@ _SOURCE_KEY = {
     "bis": "bis",
     "GDELT": "gdelt",
     "gdelt": "gdelt",
+    "federal_register": "federal_register",
+    "FedReg": "federal_register",
+    "sec_edgar": "sec_edgar",
+    "EDGAR": "sec_edgar",
 }
 
 
@@ -81,6 +85,13 @@ def sources_in_snapshot(snapshot: dict) -> set[str]:
             add(item.get("source"))
     for r in snapshot.get("rates", []) or []:
         add(r.get("source"))
+    # Phase-2 event sections carry their own per-item `source` tokens.
+    for cb in snapshot.get("cb_events", []) or []:
+        add(cb.get("source"))
+    for e in snapshot.get("earnings", []) or []:
+        add(e.get("source"))
+    for t in snapshot.get("triggers", []) or []:
+        add(t.get("source"))
     if snapshot.get("headlines"):
         keys.add("gdelt")
     return keys
@@ -194,6 +205,14 @@ def attribution_block(source_keys: set[str], policy: dict | None = None) -> dict
         spec = sources.get("bis", {})
         f = spec.get("attribution_file", "legal/bis-policy-rates.txt")
         out["bis"] = _read_notice(f)
+    if "federal_register" in source_keys:
+        spec = sources.get("federal_register", {})
+        f = spec.get("attribution_file", "legal/federal-register.txt")
+        out["federal_register"] = _read_notice(f)
+    if "sec_edgar" in source_keys:
+        spec = sources.get("sec_edgar", {})
+        f = spec.get("attribution_file", "legal/sec-edgar.txt")
+        out["sec_edgar"] = _read_notice(f)
     return out
 
 

@@ -37,6 +37,28 @@ def _ingest(which: str) -> None:
     if which in ("news", "all"):
         from .ingest import news as news_ingest
         print(f"[news] rows: {news_ingest.ingest_news(con)}")
+    # Earnings + triggers are SUPPLEMENTARY event sources over external APIs
+    # (yfinance / Federal Register / SEC). A failure there must never block the
+    # core market-data pipeline/deploy, so they are non-fatal in the aggregate run
+    # (mirrors the non-fatal brief). Their sections simply stay empty and the
+    # frontend hides them until the next successful ingest.
+    fatal = which in ("earnings", "triggers", "events")  # explicit single-source runs surface errors
+    if which in ("earnings", "events", "all"):
+        from .ingest import earnings as earnings_ingest
+        try:
+            print(f"[earnings] rows: {earnings_ingest.ingest_earnings(con)}")
+        except Exception as exc:  # noqa: BLE001
+            if fatal:
+                raise
+            print(f"[earnings] skipped — source unavailable: {exc}")
+    if which in ("triggers", "events", "all"):
+        from .ingest import triggers as triggers_ingest
+        try:
+            print(f"[triggers] rows: {triggers_ingest.ingest_triggers(con)}")
+        except Exception as exc:  # noqa: BLE001
+            if fatal:
+                raise
+            print(f"[triggers] skipped — source unavailable: {exc}")
 
 
 def cmd_ingest(args) -> None:
@@ -184,7 +206,7 @@ def main(argv=None) -> None:
     sub.add_parser("init", help="create DB + ticker dimension").set_defaults(func=cmd_init)
     pi = sub.add_parser("ingest", help="pull source data")
     pi.add_argument("source", nargs="?", default="all",
-                    choices=["markets", "rates", "news", "all"])
+                    choices=["markets", "rates", "news", "earnings", "triggers", "events", "all"])
     pi.set_defaults(func=cmd_ingest)
     sub.add_parser("marts", help="rebuild gold marts").set_defaults(func=cmd_marts)
     sub.add_parser("brief", help="build + print Morning Brief").set_defaults(func=cmd_brief)

@@ -21,6 +21,7 @@ import math
 from datetime import datetime, timezone
 
 from .. import config
+from ..transform import events as fevents
 from ..transform import marts
 from . import calendar as fcal
 from . import rights
@@ -30,7 +31,24 @@ CADENCE = "EOD"
 DELIVERY = "STATIC"
 
 _SOURCE_LABELS = [("yfinance", "yfinance"), ("us_treasury", "UST"),
-                  ("ny_fed", "NYFed"), ("bis", "BIS"), ("gdelt", "GDELT")]
+                  ("ny_fed", "NYFed"), ("bis", "BIS"), ("gdelt", "GDELT"),
+                  ("federal_register", "FedReg"), ("sec_edgar", "EDGAR")]
+
+# Required keys per Phase-2 event item — items missing any are dropped before the
+# schema sees them (defence-in-depth: a stray NULL in a source row can never make
+# the whole fail-closed export invalid).
+_EVENT_REQUIRED = {
+    "cb_events": ("bank", "series_id", "direction", "source"),
+    "earnings": ("ticker", "date", "source"),
+    "triggers": ("kind", "title", "date", "url", "source"),
+}
+
+
+def _clean_events(section: str, items, cap: int) -> list[dict]:
+    """Keep only items with every required key non-empty; cap the count."""
+    required = _EVENT_REQUIRED[section]
+    out = [it for it in (items or []) if all(it.get(k) for k in required)]
+    return out[:cap]
 
 
 # --------------------------------------------------------------------------- #
@@ -303,6 +321,16 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
     except Exception:  # noqa: BLE001
         pass
 
+    # Phase-2 event sections (central-bank decisions / earnings / catalysts).
+    # Each is derived defensively (missing source table -> []) and is deliberately
+    # kept OUT of the freshness assessment and the meta data_as_of/oldest window:
+    # events are sparse by nature (a CB meeting is ~6 weeks apart, an EO is
+    # irregular) and must never flip the EOD market snapshot to STALE.
+    uni_cfg = config.load_universe()
+    cb_ev = _clean_events("cb_events", fevents.cb_events(con, uni_cfg.get("cb_policy_rates", [])), 12)
+    earn = _clean_events("earnings", fevents.upcoming_earnings(con, uni_cfg, now), 24)
+    trig = _clean_events("triggers", fevents.recent_triggers(con), 16)
+
     payload = {
         "indices": indices,
         "futures": futures,
@@ -312,6 +340,9 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
         "rates": rate_items,
         "movers": movers,
         "headlines": headlines,
+        "cb_events": cb_ev,
+        "earnings": earn,
+        "triggers": trig,
         "brief": brief,
     }
     payload["meta"] = _build_meta(payload, market_state=market_state, now=now,
@@ -469,7 +500,8 @@ def demo_snapshot(now: datetime | None = None) -> dict:
         return out
 
     # Rough EUR crosses (units of CUR per 1 EUR) for the demo's per-item EUR price.
-    fx = {"USD": 1.1527, "GBP": 0.8551, "JPY": 181.5, "HKD": 9.03, "CNY": 7.76, "KRW": 1662.0}
+    fx = {"USD": 1.1527, "GBP": 0.8551, "JPY": 181.5, "HKD": 9.03, "CNY": 7.76,
+          "KRW": 1662.0, "CHF": 0.935}
 
     def eqi(t, n, last, r1, r5, sector=None, ccy="USD"):
         d = {"ticker": t, "name": n, "last": last, "currency": ccy,
@@ -512,7 +544,10 @@ def demo_snapshot(now: datetime | None = None) -> dict:
             ("PG", "Procter & Gamble", 168.9, -0.1, 0.2, "constituent", "USD"),
             ("KO", "Coca-Cola", 63.7, -0.4, -0.1, "constituent", "USD"),
             ("PEP", "PepsiCo", 172.4, -0.5, -0.3, "constituent", "USD"),
-            ("COST", "Costco", 892.7, 0.2, 0.9, "constituent", "USD")]),
+            ("COST", "Costco", 892.7, 0.2, 0.9, "constituent", "USD"),
+            ("WMT", "Walmart", 111.2, 0.3, 0.8, "constituent", "USD"),
+            ("MDLZ", "Mondelez", 62.3, -0.2, 0.1, "constituent", "USD"),
+            ("NESN.SW", "Nestlé", 81.0, -0.1, 0.2, "constituent", "CHF")]),
         ("software", "Tech Software", 0.9, [
             ("IGV", "iShares Expanded Tech-Software", 92.0, 0.9, 2.3, "etf", "USD"),
             ("WCLD", "WisdomTree Cloud Computing", 34.2, 1.1, 2.7, "etf", "USD"),
@@ -521,7 +556,10 @@ def demo_snapshot(now: datetime | None = None) -> dict:
             ("MSFT", "Microsoft", 452.6, 0.7, 1.8, "constituent", "USD"),
             ("CRM", "Salesforce", 268.1, 1.4, 2.9, "constituent", "USD"),
             ("ORCL", "Oracle", 214.3, 0.8, 2.1, "constituent", "USD"),
-            ("NOW", "ServiceNow", 902.4, 1.0, 2.4, "constituent", "USD")]),
+            ("NOW", "ServiceNow", 902.4, 1.0, 2.4, "constituent", "USD"),
+            ("ADBE", "Adobe", 250.4, 0.6, 1.5, "constituent", "USD"),
+            ("INTU", "Intuit", 316.1, 0.9, 2.0, "constituent", "USD"),
+            ("SAP.DE", "SAP", 155.9, 0.8, 1.9, "constituent", "EUR")]),
         ("semis", "Tech Hardware / Semis", -1.1, [
             ("SMH", "VanEck Semiconductor", 245.7, -1.1, -2.4, "etf", "USD"),
             ("SOXX", "iShares Semiconductor", 228.9, -1.0, -2.2, "etf", "USD"),
@@ -541,30 +579,55 @@ def demo_snapshot(now: datetime | None = None) -> dict:
             ("DE", "Deere", 421.0, 0.4, 0.8, "constituent", "USD"),
             ("HON", "Honeywell", 214.7, 0.3, 0.7, "constituent", "USD"),
             ("GE", "GE Aerospace", 178.9, 0.8, 1.6, "constituent", "USD"),
+            ("UNP", "Union Pacific", 292.1, 0.5, 1.1, "constituent", "USD"),
+            ("ETN", "Eaton", 415.2, 0.7, 1.5, "constituent", "USD"),
+            ("SIE.DE", "Siemens", 281.1, 0.6, 1.4, "constituent", "EUR"),
             ("PRY.MI", "Prysmian", 62.4, 0.6, 1.3, "constituent", "EUR")]),
         ("internet", "Internet & Platforms", 1.3, [
             ("KWEB", "KraneShares CSI China Internet", 32.1, 1.3, 2.8, "etf", "USD"),
             ("FDN", "First Trust Dow Jones Internet", 244.6, 1.0, 2.1, "etf", "USD"),
             ("KWEB.L", "KraneShares CSI China Internet UCITS", 28.7, 1.4, 2.9, "etf", "USD"),
+            ("GOOGL", "Alphabet", 356.1, 1.2, 2.5, "constituent", "USD"),
+            ("META", "Meta Platforms", 556.7, 1.5, 3.1, "constituent", "USD"),
+            ("AMZN", "Amazon", 271.6, 0.9, 1.9, "constituent", "USD"),
+            ("NFLX", "Netflix", 1210.0, 0.7, 1.6, "constituent", "USD"),
             ("TCEHY", "Tencent", 54.8, 1.6, 3.4, "constituent", "USD"),
             ("BABA", "Alibaba", 84.2, 1.1, 2.3, "constituent", "USD")]),
         ("financials", "Banks & Financials", 0.7, [
             ("XLF", "Financial Select Sector SPDR", 48.9, 0.7, 1.4, "etf", "USD"),
             ("EUFN", "iShares MSCI Europe Financials", 26.3, 0.9, 1.8, "etf", "USD"),
             ("EXX1.DE", "iShares STOXX Europe 600 Banks", 22.4, 1.1, 2.3, "etf", "EUR"),
+            ("JPM", "JPMorgan Chase", 351.8, 0.8, 1.6, "constituent", "USD"),
+            ("BAC", "Bank of America", 61.9, 0.9, 1.9, "constituent", "USD"),
+            ("GS", "Goldman Sachs", 1018.4, 1.1, 2.2, "constituent", "USD"),
+            ("MS", "Morgan Stanley", 210.4, 0.7, 1.5, "constituent", "USD"),
             ("UCG.MI", "UniCredit", 41.6, 1.2, 2.5, "constituent", "EUR"),
+            ("ISP.MI", "Intesa Sanpaolo", 6.51, 1.0, 2.1, "constituent", "EUR"),
+            ("HSBA.L", "HSBC", 1576.0, 0.6, 1.3, "constituent", "GBP"),
             ("DB", "Deutsche Bank", 18.7, 1.0, 2.0, "constituent", "USD")]),
         ("healthcare", "Healthcare & Pharma", -0.2, [
             ("XLV", "Health Care Select Sector SPDR", 148.3, -0.2, 0.3, "etf", "USD"),
             ("IHE", "iShares U.S. Pharmaceuticals", 62.7, -0.1, 0.4, "etf", "USD"),
             ("EXV4.DE", "iShares STOXX Europe 600 Health Care", 148.6, -0.2, 0.3, "etf", "EUR"),
             ("XDWH.DE", "Xtrackers MSCI World Health Care", 54.2, -0.1, 0.4, "etf", "EUR"),
-            ("SNY", "Sanofi", 52.4, -0.3, 0.1, "constituent", "USD"),
-            ("JNJ", "Johnson & Johnson", 162.8, -0.1, 0.2, "constituent", "USD")]),
+            ("LLY", "Eli Lilly", 1148.8, 0.4, 1.2, "constituent", "USD"),
+            ("UNH", "UnitedHealth", 414.4, -0.6, -1.1, "constituent", "USD"),
+            ("JNJ", "Johnson & Johnson", 162.8, -0.1, 0.2, "constituent", "USD"),
+            ("MRK", "Merck", 130.2, -0.2, 0.3, "constituent", "USD"),
+            ("ABBV", "AbbVie", 250.9, 0.1, 0.6, "constituent", "USD"),
+            ("PFE", "Pfizer", 25.0, -0.4, -0.9, "constituent", "USD"),
+            ("NVO", "Novo Nordisk", 47.1, -0.8, -1.6, "constituent", "USD"),
+            ("AZN", "AstraZeneca", 169.6, 0.2, 0.7, "constituent", "USD"),
+            ("NOVN.SW", "Novartis", 126.6, 0.1, 0.4, "constituent", "CHF"),
+            ("SNY", "Sanofi", 52.4, -0.3, 0.1, "constituent", "USD")]),
         ("materials", "Materials & Mining", 1.1, [
             ("XME", "SPDR S&P Metals & Mining", 68.4, 1.1, 2.4, "etf", "USD"),
             ("GDX", "VanEck Gold Miners", 42.9, 1.4, 3.0, "etf", "USD"),
             ("EXV6.DE", "iShares STOXX Europe 600 Basic Resources", 58.7, 1.0, 2.2, "etf", "EUR"),
+            ("FCX", "Freeport-McMoRan", 62.6, 1.3, 2.7, "constituent", "USD"),
+            ("NEM", "Newmont", 93.7, 1.5, 3.1, "constituent", "USD"),
+            ("NUE", "Nucor", 257.3, 0.8, 1.7, "constituent", "USD"),
+            ("RIO", "Rio Tinto", 96.9, 0.9, 2.0, "constituent", "USD"),
             ("GLEN.L", "Glencore", 3.98, 0.9, 2.1, "constituent", "GBP"),
             ("BHP", "BHP", 58.6, 1.0, 2.2, "constituent", "USD"),
             ("AEM", "Agnico Eagle Mines", 92.7, 1.6, 3.3, "constituent", "USD")]),
@@ -573,6 +636,13 @@ def demo_snapshot(now: datetime | None = None) -> dict:
             ("JXI", "iShares Global Utilities", 74.1, 0.3, 0.8, "etf", "USD"),
             ("EXV5.DE", "iShares STOXX Europe 600 Utilities", 42.9, 0.4, 1.0, "etf", "EUR"),
             ("XDWU.DE", "Xtrackers MSCI World Utilities", 46.8, 0.3, 0.9, "etf", "EUR"),
+            ("NEE", "NextEra Energy", 86.9, 0.6, 1.3, "constituent", "USD"),
+            ("DUK", "Duke Energy", 125.4, 0.3, 0.7, "constituent", "USD"),
+            ("SO", "Southern Company", 94.5, 0.4, 0.9, "constituent", "USD"),
+            ("D", "Dominion Energy", 69.2, 0.5, 1.0, "constituent", "USD"),
+            ("ENEL.MI", "Enel", 9.84, 0.7, 1.5, "constituent", "EUR"),
+            ("IBE.MC", "Iberdrola", 20.5, 0.6, 1.2, "constituent", "EUR"),
+            ("NG.L", "National Grid", 1190.0, 0.2, 0.5, "constituent", "GBP"),
             ("EOAN.DE", "E.ON", 13.6, 0.5, 1.1, "constituent", "EUR"),
             ("ELI.BR", "Elia Group", 92.4, 0.2, 0.6, "constituent", "EUR")]),
     ]
@@ -671,6 +741,56 @@ def demo_snapshot(now: datetime | None = None) -> dict:
              "url": "https://www.bloomberg.com/technology", "seendate": seen},
             {"topic": "fed", "title": "Fed officials signal patience on rate cuts", "domain": "wsj.com",
              "url": "https://www.wsj.com/economy", "seendate": seen},
+        ],
+        "cb_events": [
+            {"bank": "Fed", "series_id": "USFED", "rate": 3.625, "change_bp": -25,
+             "direction": "cut", "as_of": "2026-06-18", "source": "BIS"},
+            {"bank": "BCE", "series_id": "ECBDFR", "rate": 2.00, "change_bp": 0,
+             "direction": "hold", "as_of": None, "source": "BIS"},
+            {"bank": "BoE", "series_id": "BOEBR", "rate": 3.75, "change_bp": -25,
+             "direction": "cut", "as_of": "2026-06-19", "source": "BIS"},
+            {"bank": "BoJ", "series_id": "BOJPR", "rate": 0.50, "change_bp": 25,
+             "direction": "hike", "as_of": "2026-01-24", "source": "BIS"},
+            {"bank": "PBoC", "series_id": "PBOCLPR1Y", "rate": 3.00, "change_bp": 0,
+             "direction": "hold", "as_of": None, "source": "BIS"},
+        ],
+        "earnings": [
+            {"ticker": "XOM", "name": "Exxon Mobil", "date": "2026-08-03", "eps_estimate": 1.95,
+             "sector": "Oil & Gas", "source": "yfinance"},
+            {"ticker": "GOOGL", "name": "Alphabet", "date": "2026-08-04", "eps_estimate": 1.90,
+             "sector": "Internet & Platforms", "source": "yfinance"},
+            {"ticker": "AAPL", "name": "Apple", "date": "2026-08-05", "eps_estimate": 1.42,
+             "sector": "Tech Hardware / Semis", "source": "yfinance"},
+            {"ticker": "CAT", "name": "Caterpillar", "date": "2026-08-06", "eps_estimate": 4.85,
+             "sector": "Infrastructure & Industrials", "source": "yfinance"},
+            {"ticker": "LLY", "name": "Eli Lilly", "date": "2026-08-07", "eps_estimate": 6.10,
+             "sector": "Healthcare & Pharma", "source": "yfinance"},
+            {"ticker": "NEE", "name": "NextEra Energy", "date": "2026-08-10", "eps_estimate": 0.98,
+             "sector": "Utilities & Power", "source": "yfinance"},
+            {"ticker": "KO", "name": "Coca-Cola", "date": "2026-08-12", "eps_estimate": 0.82,
+             "sector": "Consumer Staples", "source": "yfinance"},
+            {"ticker": "RHM.DE", "name": "Rheinmetall", "date": "2026-08-14", "eps_estimate": 5.40,
+             "sector": "Defense & Aerospace", "source": "yfinance"},
+        ],
+        "triggers": [
+            {"kind": "sec_8k", "title": "NVDA — 8-K (risultati / guidance)", "ticker": "NVDA",
+             "date": "2026-07-30",
+             "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=8-K",
+             "topic": "2.02, 7.01", "source": "sec_edgar"},
+            {"kind": "sec_8k", "title": "XOM — 8-K (risultati)", "ticker": "XOM",
+             "date": "2026-07-29",
+             "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000034088&type=8-K",
+             "topic": "2.02", "source": "sec_edgar"},
+            {"kind": "executive_order",
+             "title": "Restoring Trust in the Smithsonian Institution", "ticker": None,
+             "date": "2026-07-24",
+             "url": "https://www.federalregister.gov/documents/2026/07/29/2026-15357/restoring-trust-in-the-smithsonian-institution",
+             "topic": None, "source": "federal_register"},
+            {"kind": "executive_order",
+             "title": "Securing America's Defense Supply Chains and Ensuring Domestic Acquisition of Critical Materials",
+             "ticker": None, "date": "2026-07-20",
+             "url": "https://www.federalregister.gov/documents/2026/07/23/2026-15003/securing-americas-defense-supply-chains-and-ensuring-domestic-acquisition-of-critical-materials",
+             "topic": None, "source": "federal_register"},
         ],
         "brief": {"markdown": (
             "**Regime: Risk-off** — rotazione verso i difensivi: difesa ed energia "

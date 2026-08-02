@@ -90,6 +90,7 @@ fx_eur:
   - "EURHKD=X"
   - "EURCNY=X"
   - "EURKRW=X"
+  - "EURCHF=X"
 
 sectors:
   oil_gas:
@@ -130,10 +131,15 @@ sectors:
       - {ticker: "EXH9.DE", name: "iShares STOXX Europe 600 Food & Beverage",  ccy: "EUR"}
       - {ticker: "XDWS.DE", name: "Xtrackers MSCI World Consumer Staples",     ccy: "EUR"}
     names:
-      - {ticker: "PG",   name: "Procter & Gamble"}
-      - {ticker: "KO",   name: "Coca-Cola"}
-      - {ticker: "PEP",  name: "PepsiCo"}
-      - {ticker: "COST", name: "Costco"}
+      - {ticker: "PG",      name: "Procter & Gamble"}
+      - {ticker: "KO",      name: "Coca-Cola"}
+      - {ticker: "PEP",     name: "PepsiCo"}
+      - {ticker: "COST",    name: "Costco"}
+      - {ticker: "WMT",     name: "Walmart"}
+      - {ticker: "MDLZ",    name: "Mondelez"}
+      - {ticker: "CL",      name: "Colgate-Palmolive"}
+      - {ticker: "MO",      name: "Altria"}
+      - {ticker: "NESN.SW", name: "Nestlé", ccy: "CHF"}
   software:
     label: "Tech Software"
     etfs:
@@ -142,10 +148,14 @@ sectors:
       - {ticker: "XDWT.DE", name: "Xtrackers MSCI World Information Technology", ccy: "EUR"}
       - {ticker: "EXV3.DE", name: "iShares STOXX Europe 600 Technology",         ccy: "EUR"}
     names:
-      - {ticker: "MSFT", name: "Microsoft"}
-      - {ticker: "CRM",  name: "Salesforce"}
-      - {ticker: "ORCL", name: "Oracle"}
-      - {ticker: "NOW",  name: "ServiceNow"}
+      - {ticker: "MSFT",   name: "Microsoft"}
+      - {ticker: "CRM",    name: "Salesforce"}
+      - {ticker: "ORCL",   name: "Oracle"}
+      - {ticker: "NOW",    name: "ServiceNow"}
+      - {ticker: "ADBE",   name: "Adobe"}
+      - {ticker: "INTU",   name: "Intuit"}
+      - {ticker: "PANW",   name: "Palo Alto Networks"}
+      - {ticker: "SAP.DE", name: "SAP", ccy: "EUR"}
   semis:
     label: "Tech Hardware / Semis"
     etfs:
@@ -175,6 +185,9 @@ sectors:
       - {ticker: "HON",    name: "Honeywell"}
       - {ticker: "GE",     name: "GE Aerospace"}
       - {ticker: "UNP",    name: "Union Pacific"}
+      - {ticker: "ETN",    name: "Eaton"}
+      - {ticker: "EMR",    name: "Emerson Electric"}
+      - {ticker: "SIE.DE", name: "Siemens",  ccy: "EUR"}
       - {ticker: "PRY.MI", name: "Prysmian", ccy: "EUR"}
   internet:
     label: "Internet & Platforms"
@@ -183,6 +196,10 @@ sectors:
       - {ticker: "FDN",    name: "First Trust Dow Jones Internet"}
       - {ticker: "KWEB.L", name: "KraneShares CSI China Internet UCITS"}
     names:
+      - {ticker: "GOOGL", name: "Alphabet"}
+      - {ticker: "META",  name: "Meta Platforms"}
+      - {ticker: "AMZN",  name: "Amazon"}
+      - {ticker: "NFLX",  name: "Netflix"}
       - {ticker: "TCEHY", name: "Tencent"}
       - {ticker: "BABA",  name: "Alibaba"}
   financials:
@@ -192,7 +209,16 @@ sectors:
       - {ticker: "EUFN",    name: "iShares MSCI Europe Financials"}
       - {ticker: "EXX1.DE", name: "iShares STOXX Europe 600 Banks", ccy: "EUR"}
     names:
-      - {ticker: "UCG.MI", name: "UniCredit", ccy: "EUR"}
+      - {ticker: "JPM",    name: "JPMorgan Chase"}
+      - {ticker: "BAC",    name: "Bank of America"}
+      - {ticker: "GS",     name: "Goldman Sachs"}
+      - {ticker: "MS",     name: "Morgan Stanley"}
+      - {ticker: "WFC",    name: "Wells Fargo"}
+      - {ticker: "C",      name: "Citigroup"}
+      - {ticker: "UCG.MI", name: "UniCredit",      ccy: "EUR"}
+      - {ticker: "ISP.MI", name: "Intesa Sanpaolo", ccy: "EUR"}
+      - {ticker: "BNP.PA", name: "BNP Paribas",    ccy: "EUR"}
+      - {ticker: "HSBA.L", name: "HSBC",           ccy: "GBP"}
       - {ticker: "DB",     name: "Deutsche Bank"}
   healthcare:
     label: "Healthcare & Pharma"
@@ -202,8 +228,16 @@ sectors:
       - {ticker: "EXV4.DE", name: "iShares STOXX Europe 600 Health Care",   ccy: "EUR"}
       - {ticker: "XDWH.DE", name: "Xtrackers MSCI World Health Care",       ccy: "EUR"}
     names:
-      - {ticker: "SNY", name: "Sanofi"}
-      - {ticker: "JNJ", name: "Johnson & Johnson"}
+      - {ticker: "LLY",     name: "Eli Lilly"}
+      - {ticker: "UNH",     name: "UnitedHealth"}
+      - {ticker: "JNJ",     name: "Johnson & Johnson"}
+      - {ticker: "MRK",     name: "Merck"}
+      - {ticker: "ABBV",    name: "AbbVie"}
+      - {ticker: "PFE",     name: "Pfizer"}
+      - {ticker: "NVO",     name: "Novo Nordisk"}
+      - {ticker: "AZN",     name: "AstraZeneca"}
+      - {ticker: "NOVN.SW", name: "Novartis", ccy: "CHF"}
+      - {ticker: "SNY",     name: "Sanofi"}
   materials:
     label: "Materials & Mining"
     etfs:
@@ -212,6 +246,10 @@ sectors:
       - {ticker: "XLB",     name: "Materials Select Sector SPDR"}
       - {ticker: "EXV6.DE", name: "iShares STOXX Europe 600 Basic Resources", ccy: "EUR"}
     names:
+      - {ticker: "FCX",    name: "Freeport-McMoRan"}
+      - {ticker: "NEM",    name: "Newmont"}
+      - {ticker: "NUE",    name: "Nucor"}
+      - {ticker: "RIO",    name: "Rio Tinto"}
       - {ticker: "GLEN.L", name: "Glencore", ccy: "GBP"}
       - {ticker: "BHP",    name: "BHP"}
       - {ticker: "AEM",    name: "Agnico Eagle Mines"}
@@ -223,6 +261,13 @@ sectors:
       - {ticker: "EXV5.DE", name: "iShares STOXX Europe 600 Utilities",  ccy: "EUR"}
       - {ticker: "XDWU.DE", name: "Xtrackers MSCI World Utilities",      ccy: "EUR"}
     names:
+      - {ticker: "NEE",     name: "NextEra Energy"}
+      - {ticker: "DUK",     name: "Duke Energy"}
+      - {ticker: "SO",      name: "Southern Company"}
+      - {ticker: "D",       name: "Dominion Energy"}
+      - {ticker: "ENEL.MI", name: "Enel",        ccy: "EUR"}
+      - {ticker: "IBE.MC",  name: "Iberdrola",   ccy: "EUR"}
+      - {ticker: "NG.L",    name: "National Grid", ccy: "GBP"}
       - {ticker: "EOAN.DE", name: "E.ON",        ccy: "EUR"}
       - {ticker: "ELI.BR",  name: "Elia Group",  ccy: "EUR"}
 
@@ -242,14 +287,21 @@ nyfed_rates:
   - {series_id: "SOFR", name: "Secured Overnight Financing Rate",   group: "secured",   rate: "sofr"}
 
 # BIS central-bank policy rates (WS_CBPOL; source = "BIS"). One free feed covers
-# ECB/BoE/BoJ/PBoC. `area` is the BIS REF_AREA code; `series_id`/`name` are ours.
+# US(Fed)/ECB/BoE/BoJ/PBoC. `area` is the BIS REF_AREA code; `series_id`/`name` are
+# ours. `bank` is the short display label used by the central-bank DECISIONS view
+# (transform/events.cb_events derives the last hike/cut/hold by diffing the level).
+# Enough daily history is fetched (see ingest/rates.ingest_rates BIS n) to detect the
+# most recent change per bank.
 cb_policy_rates:
-  - {series_id: "ECBDFR",    name: "ECB Policy Rate (DFR)",     area: "XM"}
-  - {series_id: "BOEBR",     name: "BoE Bank Rate",             area: "GB"}
-  - {series_id: "BOJPR",     name: "BoJ Policy Rate",           area: "JP"}
-  - {series_id: "PBOCLPR1Y", name: "PBoC Loan Prime Rate 1Y",   area: "CN"}
+  - {series_id: "USFED",     name: "Federal Reserve target (mid-point)", area: "US", bank: "Fed"}
+  - {series_id: "ECBDFR",    name: "ECB Policy Rate (DFR)",     area: "XM", bank: "BCE"}
+  - {series_id: "BOEBR",     name: "BoE Bank Rate",             area: "GB", bank: "BoE"}
+  - {series_id: "BOJPR",     name: "BoJ Policy Rate",           area: "JP", bank: "BoJ"}
+  - {series_id: "PBOCLPR1Y", name: "PBoC Loan Prime Rate 1Y",   area: "CN", bank: "PBoC"}
 
-# GDELT DOC 2.0 free news/geopolitics queries
+# GDELT DOC 2.0 free news/geopolitics queries. The tariffs/policy/geopolitics
+# queries below are the compliant "catalysts" news feed (X/Twitter has no free API;
+# executive orders come from the Federal Register, corporate events from SEC EDGAR).
 gdelt_queries:
   - {key: "iran",     query: "Iran (oil OR military OR sanctions OR strike)"}
   - {key: "fed",      query: "Federal Reserve (interest rate OR inflation)"}
@@ -257,3 +309,5 @@ gdelt_queries:
   - {key: "oil",      query: "OPEC OR crude oil price"}
   - {key: "semis",    query: "semiconductor (export controls OR chips OR Nvidia OR TSMC)"}
   - {key: "defense",  query: "defense spending OR military conflict"}
+  - {key: "tariffs",  query: "tariff (trade OR imports OR China OR EU)"}
+  - {key: "policy",   query: "White House (executive order OR sanctions OR tariff)"}

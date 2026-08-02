@@ -69,3 +69,25 @@ sources:
     attribution_file: "legal/bis-policy-rates.txt"
     reviewed_at: "2026-08-02"
     review_expires_at: "2027-08-02"
+  federal_register:
+    approval_status: approved
+    rights_basis: "U.S. Federal Register presidential documents are federal government works in the public domain (free API, no key); attribution as good practice"
+    evidence_reference: "FEDREG_REVIEW_2026_08"
+    source_page: "Federal Register API — presidential documents (executive orders)"
+    allowed_modes: [LOCAL_DEMO, PRIVATE_PERSONAL, PUBLIC_NONCOMMERCIAL, PUBLIC_COMMERCIAL]
+    allowed_uses: [persistence, ai_input, private_dashboard, private_telegram, public_dashboard]
+    attribution_required: true
+    attribution_file: "legal/federal-register.txt"
+    reviewed_at: "2026-08-02"
+    review_expires_at: "2027-08-02"
+  sec_edgar:
+    approval_status: approved
+    rights_basis: "U.S. SEC EDGAR filing metadata is public information (free API, descriptive User-Agent per SEC fair-access policy); attribution as good practice"
+    evidence_reference: "SECEDGAR_REVIEW_2026_08"
+    source_page: "SEC EDGAR submissions API — Form 8-K material events"
+    allowed_modes: [LOCAL_DEMO, PRIVATE_PERSONAL, PUBLIC_NONCOMMERCIAL, PUBLIC_COMMERCIAL]
+    allowed_uses: [persistence, ai_input, private_dashboard, private_telegram, public_dashboard]
+    attribution_required: true
+    attribution_file: "legal/sec-edgar.txt"
+    reviewed_at: "2026-08-02"
+    review_expires_at: "2027-08-02"

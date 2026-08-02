@@ -201,6 +201,49 @@ section.block.first{padding-top:34px}
 .hl-domain{font-size:12px}
 .ext-link.disabled{color:var(--muted);cursor:default}
 
+/* central-bank decisions (cb_events) */
+.cbev-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}
+@media(max-width:960px){.cbev-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:560px){.cbev-grid{grid-template-columns:repeat(2,1fr)}}
+.cbev{border-radius:var(--radius);padding:18px;display:flex;flex-direction:column;
+  transition:border-color .25s,box-shadow .25s,transform .25s}
+.cbev:hover{border-color:var(--violet-line);box-shadow:var(--glass-hi),var(--glow-v);transform:translateY(-3px)}
+.cbev-bank{color:var(--muted);font-size:12px;font-weight:600;letter-spacing:.04em}
+.cbev-rate{margin-top:10px}
+.cbev-rate-val{font-family:var(--display);font-size:26px;font-weight:700;letter-spacing:-.01em}
+.cbev-chip{align-self:flex-start;margin-top:12px;font-size:12px;font-weight:700;padding:4px 10px;border-radius:999px;
+  border:1px solid var(--violet-line);color:var(--violet-soft);background:rgba(139,92,255,.12)}
+.cbev-chip.up{color:var(--up);border-color:rgba(103,217,166,.4);background:rgba(103,217,166,.10)}
+.cbev-chip.down{color:var(--down);border-color:rgba(255,143,111,.4);background:rgba(255,143,111,.10)}
+.cbev-chip.flat{color:var(--violet-soft)}
+.cbev-asof{margin-top:10px;font-size:11px}
+
+/* upcoming earnings */
+.earn-list{border-radius:var(--radius);overflow:hidden;border:1px solid var(--glass-brd);background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  box-shadow:var(--glass-hi),0 20px 44px rgba(0,0,0,.4)}
+.earn-row{display:flex;align-items:center;gap:6px 14px;flex-wrap:wrap;padding:12px 18px;
+  border-bottom:1px solid rgba(255,255,255,.06)}
+.earn-row:last-child{border-bottom:0}
+.earn-date{font-size:12px;color:var(--violet-soft);font-weight:600;white-space:nowrap;min-width:96px}
+.earn-tk{font-weight:700;font-size:14px}
+.earn-nm{flex:1;min-width:80px;font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.earn-sec{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px}
+.earn-eps{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right;color:var(--white)}
+
+/* triggers / catalysts */
+.trig-list{display:flex;flex-direction:column;gap:12px}
+.trig-row{border-radius:var(--radius);padding:16px 18px;transition:border-color .25s,box-shadow .25s,transform .25s}
+.trig-row:hover{border-color:var(--violet-line);box-shadow:var(--glass-hi),var(--glow-v);transform:translateY(-3px)}
+.trig-head{display:flex;align-items:center;gap:10px}
+.trig-badge{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:3px 8px;border-radius:6px;
+  border:1px solid var(--violet-line);color:var(--violet-soft);background:rgba(139,92,255,.12)}
+.trig-badge.sec{color:var(--white);border-color:var(--glass-brd);background:rgba(255,255,255,.06)}
+.trig-date{font-size:11px}
+.trig-title{font-family:var(--display);font-size:16px;line-height:1.3;margin:10px 0 6px}
+.trig-title .ext-link:hover{color:var(--violet-soft)}
+.trig-meta{font-size:12px}
+
 /* brief */
 .brief{border-radius:24px;padding:30px;max-width:820px}
 .brief .when{color:var(--violet-soft);font-size:13px;font-weight:600;margin-bottom:12px;position:relative}

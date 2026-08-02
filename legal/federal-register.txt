@@ -1,0 +1,6 @@
+Source: U.S. Federal Register / Office of the Federal Register (federalregister.gov).
+
+Presidential documents (executive orders) are U.S. federal government works in the
+public domain. ForwardGuidex reproduces document titles, dates and links for
+informational purposes via the free Federal Register API; the Office of the Federal
+Register does not endorse ForwardGuidex.

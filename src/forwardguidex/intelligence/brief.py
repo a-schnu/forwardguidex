@@ -5,7 +5,8 @@ from datetime import date, datetime, timezone
 
 import pandas as pd
 
-from ..config import BRIEF_DIR
+from ..config import BRIEF_DIR, load_universe
+from ..transform import events as fevents
 from ..transform import marts
 from .llm import chat
 
@@ -61,6 +62,32 @@ def build_context(con) -> str:
     if not nws.empty:
         parts.append("\n## HEADLINES\n" + "\n".join(
             f"- [{r.topic}] {r.title} ({r.domain})" for r in nws.itertuples()))
+
+    # Phase-2 events: central-bank decisions, upcoming earnings, catalysts.
+    uni = load_universe()
+    now = datetime.now(timezone.utc)
+    cb = fevents.cb_events(con, uni.get("cb_policy_rates", []))
+    if cb:
+        def _cbline(e):
+            if e["direction"] == "hold":
+                return f"- {e['bank']}: {e['rate']:.2f}% (invariato)"
+            verb = "rialzo" if e["direction"] == "hike" else "taglio"
+            return f"- {e['bank']}: {e['rate']:.2f}% ({verb} {e['change_bp']:+d}pb il {e['as_of']})"
+        parts.append("\n## BANCHE CENTRALI (ultima decisione)\n"
+                     + "\n".join(_cbline(e) for e in cb))
+    earn = fevents.upcoming_earnings(con, uni, now, days=14, limit=12)
+    if earn:
+        def _eline(e):
+            est = f" (EPS stim. {e['eps_estimate']})" if e.get("eps_estimate") is not None else ""
+            return f"- {e['date']} {e['ticker']} ({e['sector'] or '-'}){est}"
+        parts.append("\n## EARNINGS PROSSIMI\n" + "\n".join(_eline(e) for e in earn))
+    trig = fevents.recent_triggers(con, limit=8)
+    if trig:
+        def _tline(t):
+            tag = "8-K" if t["kind"] == "sec_8k" else "EO"
+            return f"- [{tag}] {t['date']} {t['title']}"
+        parts.append("\n## CATALIZZATORI (ordini esecutivi & 8-K)\n"
+                     + "\n".join(_tline(t) for t in trig))
     return "\n".join(parts)
 
 

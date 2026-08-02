@@ -26,7 +26,13 @@ def test_treasury_and_nyfed_series():
 def test_cb_policy_rates_config():
     u = load_universe()
     cb = {r["series_id"]: r["area"] for r in u["cb_policy_rates"]}
-    assert cb == {"ECBDFR": "XM", "BOEBR": "GB", "BOJPR": "JP", "PBOCLPR1Y": "CN"}
+    # Fed (US via BIS WS_CBPOL) added for the central-bank decisions view.
+    assert cb == {"USFED": "US", "ECBDFR": "XM", "BOEBR": "GB",
+                  "BOJPR": "JP", "PBOCLPR1Y": "CN"}
+    # every bank carries a short display label used by the decisions section
+    banks = {r["series_id"]: r["bank"] for r in u["cb_policy_rates"]}
+    assert banks == {"USFED": "Fed", "ECBDFR": "BCE", "BOEBR": "BoE",
+                     "BOJPR": "BoJ", "PBOCLPR1Y": "PBoC"}
 
 
 def test_crypto_in_universe_and_dimension():
@@ -120,7 +126,8 @@ def test_sources_policy_shape():
     s = load_sources()
     assert s["deployment_mode"] in (
         "LOCAL_DEMO", "PRIVATE_PERSONAL", "PUBLIC_NONCOMMERCIAL", "PUBLIC_COMMERCIAL")
-    assert set(s["sources"]) == {"us_treasury", "ny_fed", "yfinance", "gdelt", "bis"}
+    assert set(s["sources"]) == {"us_treasury", "ny_fed", "yfinance", "gdelt", "bis",
+                                 "federal_register", "sec_edgar"}
     for spec in s["sources"].values():
         assert spec["approval_status"] == "approved"
         assert spec.get("evidence_reference")

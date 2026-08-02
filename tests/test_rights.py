@@ -23,6 +23,38 @@ def test_sources_detected(snap):
     assert rights.sources_in_snapshot(snap) == {"yfinance", "us_treasury", "ny_fed", "gdelt"}
 
 
+@pytest.fixture
+def snap_events():
+    """Snapshot carrying only the Phase-2 event sections + their sources."""
+    return {
+        "cb_events": [{"bank": "Fed", "series_id": "USFED", "direction": "hold",
+                       "source": "BIS"}],
+        "earnings": [{"ticker": "AAPL", "date": "2026-08-05", "source": "yfinance"}],
+        "triggers": [
+            {"kind": "executive_order", "title": "x", "date": "2026-07-20",
+             "url": "https://www.federalregister.gov/documents/x", "source": "federal_register"},
+            {"kind": "sec_8k", "title": "NVDA — 8-K", "date": "2026-07-30",
+             "url": "https://www.sec.gov/Archives/edgar/data/1045810/x.htm", "source": "sec_edgar"},
+        ],
+    }
+
+
+def test_event_sources_detected(snap_events):
+    assert rights.sources_in_snapshot(snap_events) == {
+        "bis", "yfinance", "federal_register", "sec_edgar"}
+
+
+def test_event_sources_pass_private_personal(snap_events):
+    assert rights.enforce("PRIVATE_PERSONAL", snapshot=snap_events) == []
+
+
+def test_new_source_attribution_present(snap_events):
+    keys = rights.sources_in_snapshot(snap_events)
+    attr = rights.attribution_block(keys)
+    assert attr["federal_register"].startswith("Source: U.S. Federal Register")
+    assert attr["sec_edgar"].startswith("Source: U.S. Securities and Exchange Commission")
+
+
 def test_private_personal_passes(snap):
     assert rights.enforce("PRIVATE_PERSONAL", snapshot=snap) == []
 

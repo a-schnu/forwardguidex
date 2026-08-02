@@ -238,3 +238,90 @@ def test_demo_attribution_includes_bis_and_verbatim_nyfed():
     assert "[[REPLACE" not in attr["ny_fed"]
     assert attr["ny_fed"].startswith("The EFFR and SOFR data is subject to the Terms of Use")
     assert "BIS" in meta["source"]
+
+
+# --- Phase-2 event sections -------------------------------------------------- #
+
+def test_demo_has_cb_events():
+    p = S.demo_snapshot()
+    cb = p["cb_events"]
+    banks = {e["bank"] for e in cb}
+    assert {"Fed", "BCE", "BoE", "BoJ", "PBoC"} <= banks
+    fed = next(e for e in cb if e["bank"] == "Fed")
+    assert fed["direction"] == "cut" and fed["change_bp"] == -25 and fed["source"] == "BIS"
+    hold = next(e for e in cb if e["direction"] == "hold")
+    assert hold["change_bp"] == 0 and hold["as_of"] is None
+    for e in cb:
+        assert e["direction"] in ("hike", "cut", "hold")
+
+
+def test_demo_has_earnings():
+    p = S.demo_snapshot()
+    earn = p["earnings"]
+    assert earn and all(e["source"] == "yfinance" for e in earn)
+    # sorted ascending by date
+    assert [e["date"] for e in earn] == sorted(e["date"] for e in earn)
+    assert all(e.get("ticker") and e.get("date") for e in earn)
+
+
+def test_demo_has_triggers():
+    p = S.demo_snapshot()
+    trig = p["triggers"]
+    kinds = {t["kind"] for t in trig}
+    assert {"executive_order", "sec_8k"} <= kinds
+    assert all(t["url"].startswith("https://") for t in trig)
+    srcs = {t["source"] for t in trig}
+    assert {"federal_register", "sec_edgar"} <= srcs
+    # newest first
+    assert [t["date"] for t in trig] == sorted((t["date"] for t in trig), reverse=True)
+
+
+def test_demo_source_string_includes_new_sources():
+    meta = S.demo_snapshot()["meta"]
+    assert "FedReg" in meta["source"] and "EDGAR" in meta["source"]
+    attr = meta["attribution"]
+    assert "federal_register" in attr and "sec_edgar" in attr
+
+
+def test_demo_events_do_not_affect_freshness():
+    """Event sections must be invisible to the freshness assessment."""
+    from forwardguidex.serve import calendar as fcal
+
+    p = S.demo_snapshot()
+    grouped = fcal.collect_as_of(p)
+    # cb_events / earnings / triggers contribute to none of the freshness classes
+    assert set(grouped) == {"equities", "futures", "ust", "nyfed", "news"}
+
+
+def test_build_snapshot_derives_cb_events_from_bis():
+    import duckdb
+    import pandas as pd
+    from datetime import datetime, timezone
+
+    from forwardguidex import db as D
+    from forwardguidex.transform import marts
+
+    con = duckdb.connect(":memory:")
+    D.build_dim_ticker(con)
+    dates = pd.date_range("2026-07-01", periods=6, freq="D")
+    rows = [{"date": dt, "ticker": "AAPL", "close": 100 + i} for i, dt in enumerate(dates)]
+    D.upsert(con, "raw_prices", pd.DataFrame(rows), keys=["ticker", "date"])
+    # a BIS series that CUTS from 4.00 to 3.75 on 2026-07-30
+    macro = [
+        {"series_id": "ECBDFR", "name": "ECB", "date": pd.Timestamp("2026-07-28"),
+         "value": 4.00, "source": "BIS"},
+        {"series_id": "ECBDFR", "name": "ECB", "date": pd.Timestamp("2026-07-29"),
+         "value": 4.00, "source": "BIS"},
+        {"series_id": "ECBDFR", "name": "ECB", "date": pd.Timestamp("2026-07-30"),
+         "value": 3.75, "source": "BIS"},
+        {"series_id": "UST10Y", "name": "US 10Y", "date": pd.Timestamp("2026-07-31"),
+         "value": 4.75, "source": "UST"},
+    ]
+    D.upsert(con, "raw_macro", pd.DataFrame(macro), keys=["series_id", "date"])
+    marts.build_marts(con)
+    p = S.build_snapshot(con, now=datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc))
+    ecb = next(e for e in p["cb_events"] if e["series_id"] == "ECBDFR")
+    assert ecb["bank"] == "BCE" and ecb["direction"] == "cut"
+    assert ecb["change_bp"] == -25 and ecb["rate"] == 3.75
+    # empty event sections still present as arrays (frontend hides them)
+    assert p["earnings"] == [] and p["triggers"] == []
