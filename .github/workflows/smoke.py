@@ -83,23 +83,43 @@ def _basic(pw: str) -> str:
 
 
 def _wait_until_deployed(host: str, label: str,
-                         *, max_wait_s: float = 60.0,
+                         *, pw: str | None = None,
+                         max_wait_s: float = 90.0,
                          initial_delay_s: float = 3.0) -> None:
-    """Poll ``host`` until the deployment routes are propagated (or fail).
+    """Poll ``host`` until the deployment is fully SERVING — both the Pages
+    Function AND the static-asset manifest — or the wait budget is exhausted.
 
     ``wrangler pages deploy`` returns as soon as the Cloudflare API accepts the
-    upload, but the unique preview URL (e.g. ``https://<hash>.pages.dev``) can
-    take a few seconds to route through the edge — during that window the URL
-    may return ``404`` even though the deploy is healthy. Poll for a status
-    that means "routing is live" (``401`` from the middleware, or ``200`` /
-    ``503``, or an authenticated ``200``) rather than the transient ``404``.
+    upload, but TWO things then propagate to the edge independently:
 
-    On timeout we do NOT fail: the caller runs its real assertions next and
-    will surface a genuine failure with better diagnostics than "still 404".
+      1. the Pages *Function* (our password-gate ``_middleware``), and
+      2. the *static-asset* manifest that ``next()`` serves once auth passes.
+
+    These do NOT propagate atomically. An UNauthenticated ``GET /`` returns
+    ``401`` straight from the middleware *before any asset lookup*, so it flips
+    to 401 the instant (1) is live — while ``/`` can still return ``404`` for a
+    few more seconds because (2) has not propagated. A caller that then does a
+    single authenticated ``GET /`` races that window, gets a transient ``404``,
+    and needlessly fails the gate + rolls back a healthy deploy. (This was the
+    real cause of the intermittent "authenticated GET / expected 200, got 404"
+    daily failures: the readiness gate proved the Function was up but never
+    that the assets were.)
+
+    So: Phase 1 waits for (1) — any of 200/401/503 proves the Function is live.
+    Phase 2 (only when ``pw`` is supplied) waits for (2) by polling an
+    AUTHENTICATED ``GET /`` until it returns ``200``. A ``401`` in Phase 2 is
+    NOT transient — it means the smoke password disagrees with the Pages
+    project's DASHBOARD_PASSWORD — so we stop immediately and let the real probe
+    report it precisely. On timeout we do NOT fail here either: the caller's
+    assertions run next and surface the authoritative ``::error::``. This only
+    ever adds patience; it never weakens an assertion, so a genuinely broken
+    deploy still fails closed.
     """
     if initial_delay_s > 0:
         time.sleep(initial_delay_s)
     deadline = time.monotonic() + max_wait_s
+
+    # Phase 1 — Function routing is live (an unauth request reaches middleware).
     attempt = 0
     while True:
         attempt += 1
@@ -108,8 +128,8 @@ def _wait_until_deployed(host: str, label: str,
         # (gate misconfigured) all prove the request reached our Function.
         if status in (200, 401, 503):
             if attempt > 1:
-                print(f"OK: {label}: deployment routing propagated after {attempt} attempts.", flush=True)
-            return
+                print(f"OK: {label}: Function routing propagated after {attempt} attempts.", flush=True)
+            break
         if time.monotonic() >= deadline:
             print(
                 f"::warning::{label}: deployment routing did not stabilise within "
@@ -119,6 +139,38 @@ def _wait_until_deployed(host: str, label: str,
             )
             return
         time.sleep(2.0)
+
+    # Phase 2 — static assets are live too (authenticated GET / -> 200). Without
+    # the password we cannot get past the gate, so there is nothing to wait on.
+    if not pw:
+        return
+    auth = {"Authorization": _basic(pw)}
+    attempt = 0
+    while True:
+        attempt += 1
+        status, _, _ = _request(_mark_bust(host + "/", f"assetwarmup{attempt}"),
+                                 headers=auth)
+        if status == 200:
+            if attempt > 1:
+                print(f"OK: {label}: static assets propagated after {attempt} attempts "
+                      f"(authenticated GET / -> 200).", flush=True)
+            return
+        if status == 401:
+            # Definitive: smoke password != Pages DASHBOARD_PASSWORD. Waiting
+            # cannot fix this — hand off to probe_auth_gate for a precise error.
+            print(f"::warning::{label}: authenticated warm-up got 401 (smoke password may not "
+                  f"match the Pages project's DASHBOARD_PASSWORD); handing off to the auth-gate probe.",
+                  flush=True)
+            return
+        if time.monotonic() >= deadline:
+            print(
+                f"::warning::{label}: static assets did not become servable within "
+                f"{max_wait_s:.0f}s (last authenticated GET / status={status}); "
+                f"continuing so the real probe surfaces the failure.",
+                flush=True,
+            )
+            return
+        time.sleep(3.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -312,13 +364,17 @@ def _main_body() -> None:
         primary_label = f"unique[{unique}]"
         # Cloudflare Pages returns 404 for a few seconds on the unique URL
         # immediately after `wrangler pages deploy` completes, while edge
-        # routing propagates. Warm up before asserting.
-        _wait_until_deployed(unique, primary_label)
+        # routing propagates. Warm up until BOTH the Function and the static
+        # assets are live (authenticated GET / -> 200) before asserting, so a
+        # propagation race can't masquerade as a smoke failure + rollback.
+        _wait_until_deployed(unique, primary_label, pw=pw)
         probe_auth_gate(unique, pw, primary_label)
-        probe_live_snapshot(unique, pw,
-                            expected_sha=expected_sha,
-                            expected_name=expected_name,
-                            label=primary_label)
+        # Same asset-propagation race applies to the snapshot bytes on a fresh
+        # unique URL, so retry (bounded) rather than single-shot -> rollback.
+        _probe_live_snapshot_retrying(unique, pw,
+                                      expected_sha=expected_sha,
+                                      expected_name=expected_name,
+                                      label=primary_label, max_wait_s=90.0)
         probe_chat_api(unique, pw, primary_label)
     else:
         _fail("wrangler-action did not emit deployment-url; cannot verify the unique deploy under test.")
@@ -331,7 +387,7 @@ def _main_body() -> None:
     # name check for a bounded window before failing.
     if app_host and app_host != unique:
         alias_label = f"alias[{app_host}]"
-        _wait_until_deployed(app_host, alias_label, max_wait_s=90.0)
+        _wait_until_deployed(app_host, alias_label, pw=pw, max_wait_s=90.0)
         probe_auth_gate(app_host, pw, alias_label)
         _probe_live_snapshot_retrying(
             app_host, pw,
