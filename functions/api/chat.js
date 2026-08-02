@@ -71,6 +71,17 @@ export async function onRequest(context) {
     });
   }
 
+  // Defense-in-depth CSRF guard: when the browser sends an Origin header it MUST
+  // match this deployment's own origin. Same-origin requests from our page carry
+  // our origin (or none); a cross-site POST that tried to burn OpenRouter credit
+  // via the owner's cached Basic-auth session would carry a foreign Origin -> 403.
+  // (The application/json content-type already forces a CORS preflight that fails
+  // cross-origin; this is a second, explicit layer.)
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== new URL(request.url).origin) {
+    return json({ error: "Origine non consentita." }, 403);
+  }
+
   const key = env.OPENROUTER_API_KEY;
   if (!key) {
     return json({ error: "Assistente non configurato (OPENROUTER_API_KEY mancante su Cloudflare Pages)." }, 503);
