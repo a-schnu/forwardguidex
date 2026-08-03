@@ -335,6 +335,40 @@ def probe_chat_api(host: str, pw: str, label: str) -> None:
     _pass(f"{label}: foreign-Origin POST -> 403.")
 
 
+def _probe_chat_api_retrying(host: str, pw: str, label: str,
+                             max_wait_s: float = 60.0) -> None:
+    """Retry ``probe_chat_api`` until success or timeout.
+
+    A passing ``auth GET /api/chat -> 405`` only proves the Worker bundle was
+    live on whatever edge PoP THAT request happened to land on — Cloudflare's
+    edge routing propagates per-PoP, not atomically, so a later request to the
+    SAME URL (e.g. the malformed-body POST a few hundred ms later) can land on
+    a different PoP via anycast and briefly hit the previous Worker version,
+    which has no /api/chat route at all -> 404. This is the same propagation
+    class as the homepage/snapshot races, just surfacing on a route+method our
+    root-path warm-up doesn't cover. None of the four requests in
+    ``probe_chat_api`` ever reach OpenRouter (each is rejected earlier — by the
+    auth middleware, the method check, the JSON parse, or the Origin check —
+    before any upstream call), so retrying the whole probe here is free of
+    cost/side-effect risk. Intermediate failures are logged as ``::warning::``
+    (not ``::error::``); the final failure re-raises so ``main`` prints one
+    authoritative ``::error::``.
+    """
+    deadline = time.monotonic() + max_wait_s
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            probe_chat_api(host, pw, label=f"{label} attempt {attempt}")
+            return
+        except SmokeFailure as exc:
+            if time.monotonic() >= deadline:
+                raise
+            print(f"::warning::{label}: /api/chat probe not yet stable ({exc}); retrying in 5s...",
+                  flush=True)
+            time.sleep(5.0)
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -375,7 +409,10 @@ def _main_body() -> None:
                                       expected_sha=expected_sha,
                                       expected_name=expected_name,
                                       label=primary_label, max_wait_s=90.0)
-        probe_chat_api(unique, pw, primary_label)
+        # Same per-PoP edge-routing propagation race applies to /api/chat
+        # (a passing GET doesn't guarantee a later POST lands on an equally
+        # up-to-date edge node), so retry (bounded) rather than single-shot.
+        _probe_chat_api_retrying(unique, pw, primary_label, max_wait_s=60.0)
     else:
         _fail("wrangler-action did not emit deployment-url; cannot verify the unique deploy under test.")
 
