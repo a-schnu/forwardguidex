@@ -144,15 +144,16 @@ body::before,body::after{
   content:""; position:fixed; border-radius:50%; filter:blur(80px);
   pointer-events:none; z-index:0;
 }
-body::before{width:52vmax;height:52vmax;top:-18vmax;left:-12vmax;
-  background:radial-gradient(circle,rgba(139,92,255,.34),transparent 68%)}
-body::after{width:44vmax;height:44vmax;bottom:-16vmax;right:-10vmax;
-  background:radial-gradient(circle,rgba(38,169,255,.26),transparent 68%)}
+body::before{width:56vmax;height:56vmax;top:-20vmax;left:-14vmax;
+  background:radial-gradient(circle,rgba(139,92,255,.46),transparent 70%)}
+body::after{width:48vmax;height:48vmax;bottom:-18vmax;right:-12vmax;
+  background:radial-gradient(circle,rgba(38,169,255,.36),transparent 70%)}
 .card{
   position:relative; z-index:1; width:100%; max-width:392px; padding:38px 34px 32px;
   border:1px solid var(--glass-brd); border-radius:22px; background:var(--glass-bg);
   backdrop-filter:blur(22px) saturate(160%);
-  box-shadow:0 24px 70px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.18);
+  box-shadow:0 24px 70px rgba(0,0,0,.7), 0 0 0 1px rgba(139,92,255,.16),
+    inset 0 1px 0 rgba(255,255,255,.18);
   animation:rise .5s cubic-bezier(.2,.8,.2,1) both;
 }
 @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
@@ -164,7 +165,8 @@ body::after{width:44vmax;height:44vmax;bottom:-16vmax;right:-10vmax;
   -webkit-background-clip:text;background-clip:text;color:transparent;
 }
 h1{margin:0 0 8px;font-size:29px;line-height:1.15;letter-spacing:-.6px;font-weight:650}
-.caption{margin:0 0 26px;font-size:13.5px;line-height:1.5;color:var(--muted);max-width:31ch}
+.caption{margin:0 0 26px;font-size:13.5px;line-height:1.55;color:var(--muted);max-width:34ch;
+  text-wrap:balance}
 label{display:block;font-size:11px;letter-spacing:.9px;text-transform:uppercase;
   color:var(--muted);margin-bottom:8px}
 input{
