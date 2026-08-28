@@ -71,6 +71,13 @@ GDELT_SPACING_RECOVERY = 0.75   # multiplier applied after a clean query
 # reached are recorded as `skipped` failures so the health rollup stays honest.
 GDELT_TOTAL_BUDGET_SEC = 600.0
 
+# Circuit breaker. When GDELT refuses a client it refuses it for a while: the
+# 2026-08-28 probe burned 1635 s across all 10 topics for zero rows, every one
+# failing with a reset or a 429. Once this many topics have failed back-to-back
+# under pressure, stop asking and leave the remaining wall-clock to the rest of
+# the pipeline — the outcome is identical and the snapshot is FAILED either way.
+GDELT_CONSECUTIVE_FAILURE_LIMIT = 4
+
 # Failure classes that mean "the provider is under pressure" and should widen
 # the spacing for the *next* topic, not just retry the current one.
 _PRESSURE_CLASSES = frozenset({
@@ -223,6 +230,7 @@ def ingest_news_with_report(con) -> NewsCollectionReport:
 
     client = HttpClient()
     spacing = GDELT_MIN_SPACING_SEC
+    consecutive_pressure_failures = 0
     deadline = time.monotonic() + GDELT_TOTAL_BUDGET_SEC
     try:
         for item in load_universe().get("gdelt_queries", []):
@@ -230,6 +238,20 @@ def ingest_news_with_report(con) -> NewsCollectionReport:
             report.attempted_queries += 1
 
             remaining = deadline - time.monotonic()
+            if consecutive_pressure_failures >= GDELT_CONSECUTIVE_FAILURE_LIMIT:
+                _log.warning(
+                    "[news] %s skipped: provider circuit breaker open after %d consecutive failures",
+                    key, consecutive_pressure_failures,
+                )
+                report.per_query.append(QueryOutcome(
+                    key=key, status="skipped", attempts=0,
+                    error_detail=(
+                        f"circuit breaker open after {consecutive_pressure_failures} "
+                        "consecutive provider failures"
+                    ),
+                ))
+                report.failed_queries += 1
+                continue
             if remaining <= spacing:
                 # Out of wall-clock budget: record the topic as skipped rather
                 # than silently shrinking the universe, and keep going so the
@@ -251,6 +273,7 @@ def ingest_news_with_report(con) -> NewsCollectionReport:
                 report.successful_queries += 1
                 report.last_success_at = now.isoformat()
                 spacing = max(GDELT_MIN_SPACING_SEC, spacing * GDELT_SPACING_RECOVERY)
+                consecutive_pressure_failures = 0
             else:
                 report.failed_queries += 1
                 throttled = (
@@ -264,6 +287,7 @@ def ingest_news_with_report(con) -> NewsCollectionReport:
                     # not per query. A TCP reset or a timeout is the same signal
                     # as a 429 — it just arrives in a different disguise.
                     spacing = min(GDELT_MAX_SPACING_SEC, spacing * GDELT_SPACING_BACKOFF)
+                    consecutive_pressure_failures += 1
 
             for a in articles:
                 rows.append({

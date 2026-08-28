@@ -276,3 +276,21 @@ def test_transient_server_status_is_retried():
                             backoff_cap=0.002, _sleep=_no_sleep)
     assert res.ok
     assert session.calls == 2
+
+
+def test_attempt_timeouts_are_clamped_to_the_remaining_budget():
+    """One slow request used to overshoot `max_elapsed` by its whole duration."""
+    seen: list[tuple[float, float]] = []
+
+    class _TimeoutSpySession(_FakeSession):
+        def get(self, url, params=None, headers=None, timeout=None):
+            seen.append(timeout)
+            return super().get(url, params=params, headers=headers, timeout=timeout)
+
+    session = _TimeoutSpySession([_FakeResp(status=200, json_body={})])
+    client = HttpClient(session=session)
+    res = client.fetch_json("https://api.example/x", connect_timeout=45, read_timeout=60,
+                            max_elapsed=10, _sleep=_no_sleep)
+    assert res.ok
+    connect, read = seen[0]
+    assert connect <= 10 and read <= 10

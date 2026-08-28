@@ -96,6 +96,11 @@ _JSONISH_CONTENT_TYPES = ("json", "+json", "javascript")
 # HTML error pages; we only need the first line or two to tell throttle from bug.
 _BODY_SNIPPET_CHARS = 180
 
+# Floor for a budget-clamped timeout: never hand requests a 0 s (== infinite in
+# some code paths) or absurdly small timeout just because the budget is nearly
+# spent. The elapsed check at the top of the retry loop is what actually stops us.
+_MIN_EFFECTIVE_TIMEOUT = 1.0
+
 _log = logging.getLogger("forwardguidex.http")
 
 
@@ -345,12 +350,22 @@ class HttpClient:
 
             retry_after: float | None = None
 
+            # Clamp this attempt's timeouts to the budget that is actually left.
+            # `max_elapsed` used to be checked only *between* attempts, so a
+            # single slow request could overshoot it by its whole duration —
+            # measured 2026-08-28 against GDELT, one query with max_elapsed=150
+            # took 324 s, because urllib3 applies the connect timeout once per
+            # resolved address and the host has several.
+            budget_left = max_elapsed - (time.monotonic() - state.started)
+            eff_connect = max(_MIN_EFFECTIVE_TIMEOUT, min(connect_timeout, budget_left))
+            eff_read = max(_MIN_EFFECTIVE_TIMEOUT, min(read_timeout, budget_left))
+
             try:
                 resp = self._session.get(
                     url,
                     params=params,
                     headers=headers,
-                    timeout=(connect_timeout, read_timeout),
+                    timeout=(eff_connect, eff_read),
                 )
             except requests.Timeout as exc:
                 last_result = FetchResult(

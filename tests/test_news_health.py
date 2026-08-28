@@ -246,3 +246,35 @@ def test_news_budget_exhaustion_skips_remaining_topics(monkeypatch):
     # skipped topics surface in meta.source_health.gdelt.errors[]
     classes = {e["class"] for e in r.to_metadata()["errors"]}
     assert classes == {"skipped"}
+
+
+def test_circuit_breaker_stops_asking_a_refusing_provider(monkeypatch):
+    """1635 s for zero rows (2026-08-28 probe) must not be repeatable."""
+    monkeypatch.setattr(newsmod, "GDELT_CONSECUTIVE_FAILURE_LIMIT", 2)
+    reset = httpc.FetchResult(
+        ok=False, status=None, error_class=httpc.ErrorClass.NETWORK,
+        error_detail="ConnectionResetError", attempts=4,
+    )
+    per_key = {"Q-FED": reset, "Q-BCE": reset, "Q-OIL": reset}
+    rec = _install_recording(monkeypatch, per_key)
+    r = newsmod.ingest_news_with_report(con=None)
+
+    # Third topic is never requested.
+    assert len(rec.spacings) == 2
+    assert [q.status for q in r.per_query] == ["network", "network", "skipped"]
+    assert r.attempted_queries == 3
+    assert r.failed_queries == 3
+    assert r.status == "FAILED"
+
+
+def test_a_success_resets_the_circuit_breaker(monkeypatch):
+    monkeypatch.setattr(newsmod, "GDELT_CONSECUTIVE_FAILURE_LIMIT", 2)
+    per_key = {
+        "Q-FED": _make_result(ok=False, status=503, err=httpc.ErrorClass.SERVER_ERROR),
+        "Q-BCE": _make_result(ok=True, articles=2),
+        "Q-OIL": _make_result(ok=False, status=503, err=httpc.ErrorClass.SERVER_ERROR),
+    }
+    rec = _install_recording(monkeypatch, per_key)
+    r = newsmod.ingest_news_with_report(con=None)
+    assert len(rec.spacings) == 3          # breaker never opened
+    assert r.status == "DEGRADED"
