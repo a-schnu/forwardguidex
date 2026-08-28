@@ -118,7 +118,7 @@ jobs:
             exit 0
           fi
           cat gate.tap
-          grep -n -A 14 "^not ok" gate.tap | head -n 45 | while IFS= read -r line; do
+          grep -nE "not ok|^[[:space:]]+(error|expected|actual|operator|code):" gate.tap | head -n 45 | while IFS= read -r line; do
             echo "::error::$line"
           done
           exit 1
