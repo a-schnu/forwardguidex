@@ -90,7 +90,7 @@ jobs:
           python -c "import forwardguidex, forwardguidex.serve.snapshot, forwardguidex.ingest.news"
 
   gate:
-    name: access gate behaviour
+    name: gate + chat proxy behaviour
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -100,7 +100,23 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Test functions/_middleware.js
+      - name: Syntax-check the browser bundle
+        # Nothing else in CI parses app/js/*.js — a typo there ships to
+        # production and only surfaces as a blank dashboard. These are ES
+        # modules in .js files, which `node --check` would read as CommonJS, so
+        # each one is checked through a .mjs copy.
+        run: |
+          set -euo pipefail
+          mkdir -p .jscheck
+          for f in app/js/*.js functions/_middleware.js functions/api/chat.js; do
+            cp "$f" ".jscheck/$(basename "$f" .js).mjs"
+          done
+          for f in .jscheck/*.mjs; do
+            node --check "$f"
+            echo "ok $f"
+          done
+
+      - name: Test functions/_middleware.js and functions/api/chat.js
         # Uses the runner's preinstalled Node and its built-in test runner, so no
         # extra action and no npm install. The gate is the one piece of this
         # project where a mistake means publishing the dashboard, and smoke.py
@@ -113,15 +129,15 @@ jobs:
         run: |
           set -uo pipefail
           node --version
-          if node --test --test-reporter=tap tests/gate/middleware.test.mjs > gate.tap 2>&1; then
+          if node --test --test-reporter=tap tests/gate/middleware.test.mjs tests/gate/chat.test.mjs > gate.tap 2>&1; then
             cat gate.tap
             # Guard the guard: a runner that discovers no tests also exits 0, and
             # a green job that asserted nothing is worse than no job at all.
             # (Passing the DIRECTORY to --test does exactly that here, which is
             # why the file is named explicitly above.)
             PASS=$(grep -m1 -E "^# pass [0-9]+" gate.tap | tr -dc "0-9")
-            if [ "${PASS:-0}" -lt 20 ]; then
-              echo "::error::gate suite reported only ${PASS:-0} passing tests; expected at least 20."
+            if [ "${PASS:-0}" -lt 55 ]; then
+              echo "::error::gate suite reported only ${PASS:-0} passing tests; expected at least 55."
               exit 1
             fi
             echo "gate suite: ${PASS} passing."

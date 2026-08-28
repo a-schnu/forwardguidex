@@ -504,6 +504,7 @@ footer{border-top:1px solid rgba(255,255,255,.07);padding:40px 0;color:var(--mut
 .chat-msg{display:flex;max-width:100%}
 .chat-msg.chat-user{justify-content:flex-end}
 .chat-msg.chat-assistant,.chat-msg.chat-system{justify-content:flex-start}
+.chat-msg.chat-assistant{flex-direction:column;align-items:flex-start;gap:6px}
 .chat-bubble{max-width:85%;border-radius:16px;padding:10px 14px;font-size:14px;line-height:1.5;
   overflow-wrap:anywhere;word-break:break-word}
 .chat-user .chat-bubble{background:rgba(139,92,255,.18);border:1px solid var(--violet-line);
@@ -562,4 +563,60 @@ footer{border-top:1px solid rgba(255,255,255,.07);padding:40px 0;color:var(--mut
   .chat-fab{transition:none}
   .chat-panel{animation:none}
   .chat-dot{animation:none;opacity:.6}
+}
+
+/* ---- chat: streaming, sources, starter chips, web toggle (2026-08-28) ---- */
+
+/* Caret that blinks only while tokens are still arriving. */
+.chat-bubble.chat-streaming>:last-child::after{content:'';display:inline-block;width:2px;height:1em;
+  margin-left:2px;vertical-align:-2px;background:var(--violet-soft);animation:chatCaret 1s steps(2) infinite}
+@keyframes chatCaret{0%,49%{opacity:1}50%,100%{opacity:0}}
+
+/* Footer under an assistant answer: copy + provenance badges. */
+.chat-foot{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-left:2px}
+.chat-mini{background:none;border:1px solid var(--glass-brd);border-radius:999px;color:var(--muted);
+  font:inherit;font-size:11px;padding:2px 9px;cursor:pointer;transition:color .15s,border-color .15s}
+.chat-mini:hover{color:var(--white);border-color:var(--violet-line)}
+.chat-mini:focus-visible{outline:none;border-color:var(--violet);box-shadow:var(--glow-v)}
+.chat-badge{font-size:10.5px;letter-spacing:.3px;text-transform:uppercase;color:var(--violet-soft);
+  border:1px solid var(--violet-line);border-radius:999px;padding:2px 8px}
+.chat-badge.warn{color:var(--accent-yellow);border-color:rgba(255,214,10,.35)}
+
+/* Web-search sources, when the answer used any. */
+.chat-cites{display:flex;flex-direction:column;gap:3px;padding-left:2px}
+.chat-cite{font-size:11.5px;line-height:1.45;color:var(--muted);text-decoration:none;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.chat-cite:hover{color:var(--violet-soft);text-decoration:underline}
+
+/* Starter questions / retry. */
+.chat-chips{display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 2px 2px}
+.chat-chip{background:rgba(139,92,255,.09);border:1px solid var(--violet-line);border-radius:999px;
+  color:var(--violet-soft);font:inherit;font-size:12px;line-height:1.35;text-align:left;
+  padding:6px 11px;cursor:pointer;transition:background .15s,color .15s,transform .12s}
+.chat-chip:hover{background:rgba(139,92,255,.2);color:var(--white)}
+.chat-chip:active{transform:translateY(1px)}
+.chat-chip:focus-visible{outline:none;box-shadow:var(--glow-v)}
+
+/* Web-search mode toggle in the header: auto / always / never. */
+.chat-web{position:relative;width:34px;height:34px;border-radius:50%;flex:0 0 auto;cursor:pointer;
+  display:grid;place-items:center;background:var(--glass-bg);border:1px solid var(--glass-brd);
+  color:var(--muted);transition:color .15s,border-color .15s,box-shadow .15s}
+.chat-web svg{width:17px;height:17px;display:block}
+.chat-web:hover{color:var(--violet-soft);box-shadow:var(--glow-v)}
+.chat-web:focus-visible{outline:none;border-color:var(--violet);box-shadow:var(--glow-v)}
+.chat-web-dot{position:absolute;right:4px;bottom:4px;width:7px;height:7px;border-radius:50%;
+  border:1.5px solid #0b0b12}
+.chat-web[data-mode="auto"] .chat-web-dot{background:var(--violet-soft)}
+.chat-web[data-mode="on"]{color:var(--up)}
+.chat-web[data-mode="on"] .chat-web-dot{background:var(--up)}
+.chat-web[data-mode="off"]{color:#5d5d69}
+.chat-web[data-mode="off"] .chat-web-dot{background:#5d5d69}
+
+/* The send button becomes a stop button while a reply is streaming. */
+.chat-send.is-stop svg{display:none}
+.chat-send.is-stop::before{content:'';width:12px;height:12px;border-radius:3px;background:currentColor}
+
+@media(prefers-reduced-motion:reduce){
+  .chat-bubble.chat-streaming>:last-child::after{animation:none}
+  .chat-chip{transition:none}
 }
