@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, describe, it } from "node:test";
+import { before, describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 
 const PASSWORD = "correct-horse-battery-staple";
@@ -36,12 +36,19 @@ before(async () => {
   ({ onRequest } = await import(pathToFileURL(copy).href));
 });
 
-/** Invoke the gate. `next()` stands in for "the dashboard was served". */
-function call(path = "/", { method = "GET", headers = {}, body, password = PASSWORD } = {}) {
+/** Invoke the gate. `next()` stands in for "the dashboard was served".
+ *
+ * `env` is passed through verbatim rather than derived from a `password`
+ * option: a default parameter would swallow an explicit `undefined`, which is
+ * exactly the case the fail-closed tests need to exercise.
+ */
+const CONFIGURED = { DASHBOARD_PASSWORD: PASSWORD };
+
+function call(path = "/", { method = "GET", headers = {}, body, env = CONFIGURED } = {}) {
   const request = new Request(ORIGIN + path, { method, headers, body });
   return onRequest({
     request,
-    env: password === undefined ? {} : { DASHBOARD_PASSWORD: password },
+    env,
     next: async () => new Response(SERVED, { status: 200 }),
   });
 }
@@ -70,13 +77,13 @@ async function login(pw = PASSWORD) {
 
 describe("fail-closed", () => {
   it("denies every request when DASHBOARD_PASSWORD is unset", async () => {
-    const res = await call("/", { password: undefined });
+    const res = await call("/", { env: {} });
     assert.equal(res.status, 503);
     assert.match(await res.text(), /missing DASHBOARD_PASSWORD/);
   });
 
   it("denies even a correct-looking Basic header when unconfigured", async () => {
-    const res = await call("/", { headers: basic(PASSWORD), password: undefined });
+    const res = await call("/", { headers: basic(PASSWORD), env: {} });
     assert.equal(res.status, 503);
   });
 });
@@ -246,7 +253,7 @@ describe("session cookie", () => {
     const token = await login();
     const res = await call("/", {
       headers: { Cookie: `fgx_session=${token}` },
-      password: "rotated-password",
+      env: { DASHBOARD_PASSWORD: "rotated-password" },
     });
     assert.equal(res.status, 401, "rotating DASHBOARD_PASSWORD must invalidate sessions");
   });
@@ -273,5 +280,3 @@ describe("session cookie", () => {
     assert.match(res.headers.get("Set-Cookie"), /Max-Age=0/);
   });
 });
-
-after(() => {});

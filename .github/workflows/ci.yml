@@ -105,7 +105,20 @@ jobs:
         # extra action and no npm install. The gate is the one piece of this
         # project where a mistake means publishing the dashboard, and smoke.py
         # only checks it AFTER the bytes are live on Cloudflare.
+        #
+        # On failure the TAP diagnostics are re-emitted as `::error::`
+        # annotations. Downloading a raw job log needs repo-admin rights;
+        # annotations are readable by anyone who can see the repo, so a failure
+        # here stays diagnosable without escalating permissions.
         run: |
-          set -euo pipefail
+          set -uo pipefail
           node --version
-          node --test tests/gate/
+          if node --test --test-reporter=tap tests/gate/ > gate.tap 2>&1; then
+            cat gate.tap
+            exit 0
+          fi
+          cat gate.tap
+          grep -n -A 14 "^not ok" gate.tap | head -n 45 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit 1
