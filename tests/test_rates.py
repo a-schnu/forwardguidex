@@ -69,7 +69,7 @@ def test_ingest_rates_sources_and_counts(con, monkeypatch):
     n = rates.ingest_rates(con)
     assert n > 0
     df = con.execute("SELECT source, COUNT(*) c FROM raw_macro GROUP BY source ORDER BY source").df()
-    counts = dict(zip(df["source"], df["c"]))
+    counts = dict(zip(df["source"], df["c"], strict=True))
     assert counts["UST"] == 8      # 4 maturities x 2 dates (deduped across years)
     assert counts["NYFED"] == 4    # EFFR + SOFR, 2 dates each
     assert counts["BIS"] == 8      # ECB/BoE/BoJ/PBoC, 2 dates each

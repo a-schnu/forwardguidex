@@ -1,6 +1,4 @@
 """Fail-closed validator: valid demo + every documented failure mode."""
-import copy
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 

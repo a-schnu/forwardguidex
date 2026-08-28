@@ -52,7 +52,7 @@ def _ingest(which: str) -> None:
         from .ingest import earnings as earnings_ingest
         try:
             print(f"[earnings] rows: {earnings_ingest.ingest_earnings(con)}")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if fatal:
                 raise
             print(f"[earnings] skipped — source unavailable: {exc}")
@@ -60,7 +60,7 @@ def _ingest(which: str) -> None:
         from .ingest import triggers as triggers_ingest
         try:
             print(f"[triggers] rows: {triggers_ingest.ingest_triggers(con)}")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if fatal:
                 raise
             print(f"[triggers] skipped — source unavailable: {exc}")
@@ -162,7 +162,8 @@ def cmd_decommission_fred(args) -> None:
         placeholders = ",".join("?" for _ in _FRED_SERIES)
         before = con.execute("SELECT COUNT(*) FROM raw_macro").fetchone()[0]
         con.execute(
-            f"DELETE FROM raw_macro WHERE source LIKE 'FRED%' OR series_id IN ({placeholders})",
+            # `placeholders` is a generated run of `?`; the values themselves are bound.
+            f"DELETE FROM raw_macro WHERE source LIKE 'FRED%' OR series_id IN ({placeholders})",  # noqa: S608
             _FRED_SERIES,
         )
         after = con.execute("SELECT COUNT(*) FROM raw_macro").fetchone()[0]

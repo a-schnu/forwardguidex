@@ -49,6 +49,58 @@ DEFAULT_RETRY_AFTER_CAP = 30.0
 # HTTP statuses we consider transient (worth a bounded retry).
 _TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
+# --- Soft throttling (HTTP 200 + non-JSON body) ------------------------------
+#
+# Some providers — GDELT above all — signal throttling / transient overload with
+# HTTP *200* and a plain-text or HTML body instead of a proper 429. Treating that
+# as a permanent parse error (as we did until 2026-08-28) silently drops queries:
+# CI run 33116396414 lost the `mercati` and `difesa` topics to
+# `class=parse status=200` and still shipped the snapshot as DEGRADED.
+#
+# `fetch_json(retry_on_soft_throttle=True)` re-classifies such a body as
+# RATE_LIMITED so the normal bounded-retry + backoff path applies, EXCEPT when the
+# body matches a permanent marker (a malformed query is not going to fix itself).
+_SOFT_THROTTLE_MARKERS = (
+    "rate limit",
+    "ratelimit",
+    "too many request",
+    "too many queries",
+    "please try again",
+    "try again later",
+    "please wait",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "service unavailable",
+    "overloaded",
+    "busy",
+    "maintenance",
+)
+
+# Permanent: the request itself is wrong. Retrying only burns the budget.
+_PERMANENT_BODY_MARKERS = (
+    "query was too short",
+    "too short",
+    "no valid search term",
+    "specify a search term",
+    "invalid query",
+    "syntax error",
+    "unrecognized",
+    "not a valid",
+)
+
+# Content types we accept as "the provider at least intended to send JSON".
+_JSONISH_CONTENT_TYPES = ("json", "+json", "javascript")
+
+# How much of an unparseable body we keep for diagnostics. Bodies can be whole
+# HTML error pages; we only need the first line or two to tell throttle from bug.
+_BODY_SNIPPET_CHARS = 180
+
+# Floor for a budget-clamped timeout: never hand requests a 0 s (== infinite in
+# some code paths) or absurdly small timeout just because the budget is nearly
+# spent. The elapsed check at the top of the retry loop is what actually stops us.
+_MIN_EFFECTIVE_TIMEOUT = 1.0
+
 _log = logging.getLogger("forwardguidex.http")
 
 
@@ -130,13 +182,70 @@ def _parse_retry_after(value: str | None, *, cap: float, now: datetime | None = 
         return None
 
 
-def _backoff_delay(attempt: int, *, base: float, cap: float) -> float:
-    """Exponential backoff with full jitter, bounded by ``cap``.
+def _body_snippet(resp: Any) -> str:
+    """First ``_BODY_SNIPPET_CHARS`` of the response body, collapsed to one line.
 
-    ``attempt`` is 1-indexed (attempt=1 => base*1..2). AWS-style full jitter.
+    Defensive: a response double (or a streamed body already consumed) may not
+    expose ``.text``. Never raises — diagnostics must not break ingestion.
+    """
+    try:
+        text = getattr(resp, "text", "") or ""
+    except Exception:  # noqa: BLE001 - diagnostics must never break ingestion
+        return ""
+    return " ".join(str(text).split())[:_BODY_SNIPPET_CHARS]
+
+
+def _classify_unparseable_body(resp: Any, snippet: str) -> tuple[str, str]:
+    """Decide whether a 200 with a non-JSON body is transient or permanent.
+
+    Returns ``(error_class, reason)``. ``error_class`` is
+    :attr:`ErrorClass.RATE_LIMITED` for a soft throttle (retry it) or
+    :attr:`ErrorClass.PARSE` for a body we should never retry.
+
+    Precedence, most specific first:
+
+    1. a permanent marker in the body wins outright (malformed query);
+    2. a known throttle/overload marker => soft throttle;
+    3. the provider did not even *claim* JSON in ``Content-Type`` => soft
+       throttle (an HTML error page in front of a JSON API is an infrastructure
+       blip far more often than a contract change), retries stay bounded;
+    4. otherwise the provider claimed JSON and sent garbage => real parse bug.
+    """
+    low = snippet.lower()
+    for marker in _PERMANENT_BODY_MARKERS:
+        if marker in low:
+            return ErrorClass.PARSE, f"permanent body marker {marker!r}"
+    for marker in _SOFT_THROTTLE_MARKERS:
+        if marker in low:
+            return ErrorClass.RATE_LIMITED, f"soft-throttle marker {marker!r}"
+
+    try:
+        ctype = (getattr(resp, "headers", {}) or {}).get("Content-Type", "") or ""
+    except Exception:  # noqa: BLE001 - diagnostics must never break ingestion
+        ctype = ""
+    ctype = str(ctype).lower()
+    if not any(tok in ctype for tok in _JSONISH_CONTENT_TYPES):
+        return ErrorClass.RATE_LIMITED, f"non-JSON Content-Type {ctype or '<absent>'!r}"
+    return ErrorClass.PARSE, "declared JSON but body is unparseable"
+
+
+def _backoff_delay(attempt: int, *, base: float, cap: float) -> float:
+    """Exponential backoff with *equal* jitter, bounded by ``cap``.
+
+    ``attempt`` is 1-indexed (attempt=1 => ceiling == base).
+
+    AWS-style *full* jitter — ``uniform(0, ceiling)`` — was the original
+    implementation, and against GDELT it was actively harmful: with
+    ``base=1.0`` and 3 attempts the expected waits were ~0.5 s and ~1 s, i.e.
+    we re-hit a provider that needs seconds of headroom almost immediately and
+    burned the whole attempt budget inside two seconds. Equal jitter
+    (``ceiling/2 + uniform(0, ceiling/2)``) keeps the decorrelation that
+    matters for thundering herds while guaranteeing the wait actually grows.
     """
     ceiling = min(cap, base * (2 ** (attempt - 1)))
-    return random.uniform(0.0, ceiling)
+    half = ceiling / 2.0
+    # Retry jitter, not a secret: `random` is the right tool here.
+    return half + random.uniform(0.0, half)  # noqa: S311
 
 
 class HttpClient:
@@ -172,6 +281,7 @@ class HttpClient:
         max_elapsed: float = DEFAULT_MAX_ELAPSED,
         retry_after_cap: float = DEFAULT_RETRY_AFTER_CAP,
         min_spacing: float = 0.0,
+        retry_on_soft_throttle: bool = False,
         _sleep=time.sleep,
         _now=None,
     ) -> FetchResult:
@@ -181,8 +291,18 @@ class HttpClient:
         non-retryable 4xx (permanent client error like ``404 quote not found``)
         returns immediately with ``ErrorClass.CLIENT_ERROR`` and is NOT retried.
 
-        A malformed JSON body is NOT retried (``ErrorClass.PARSE``): retrying an
-        endpoint that consistently returns HTML behind a 200 wastes budget.
+        A malformed JSON body is normally NOT retried (``ErrorClass.PARSE``):
+        retrying an endpoint that consistently returns HTML behind a 200 wastes
+        budget. Providers that signal throttling with ``200`` + a plain-text or
+        HTML body (GDELT) should pass ``retry_on_soft_throttle=True``: the body
+        is then sniffed by :func:`_classify_unparseable_body` and a throttle-like
+        body is re-classified as ``ErrorClass.RATE_LIMITED`` and retried under
+        the same bounded policy. A body matching a permanent marker (malformed
+        query) still returns ``PARSE`` immediately.
+
+        Either way the first ``_BODY_SNIPPET_CHARS`` of an unparseable body are
+        recorded in ``error_detail`` — without them ``Expecting value: line 1
+        column 1`` is undiagnosable.
 
         ``min_spacing`` (seconds) can be passed by callers who want to serialize
         their own back-to-back requests (see GDELT concurrency guidance).
@@ -192,6 +312,29 @@ class HttpClient:
 
         state = _RetryState()
         last_result = FetchResult(ok=False)
+
+        def _finalize(result: FetchResult) -> FetchResult:
+            """Stamp the shared retry counters onto whatever we are returning."""
+            result.attempts = state.attempts
+            result.rate_limited_attempts = state.rate_limited_attempts
+            result.elapsed = time.monotonic() - state.started
+            return result
+
+        def _next_delay(preferred: float | None = None) -> float | None:
+            """Sleep to apply before the next attempt, or ``None`` to stop.
+
+            Stops when the attempt budget is exhausted or when sleeping would
+            overrun ``max_elapsed`` — the single place both bounds are enforced.
+            """
+            if state.attempts >= attempts:
+                return None
+            delay = preferred if preferred is not None else _backoff_delay(
+                state.attempts, base=backoff_base, cap=backoff_cap,
+            )
+            remaining = max_elapsed - (time.monotonic() - state.started)
+            if delay >= remaining:
+                return None
+            return delay
 
         while True:
             state.attempts += 1
@@ -205,12 +348,24 @@ class HttpClient:
                     last_result.error_detail = "max elapsed budget exceeded"
                 return last_result
 
+            retry_after: float | None = None
+
+            # Clamp this attempt's timeouts to the budget that is actually left.
+            # `max_elapsed` used to be checked only *between* attempts, so a
+            # single slow request could overshoot it by its whole duration —
+            # measured 2026-08-28 against GDELT, one query with max_elapsed=150
+            # took 324 s, because urllib3 applies the connect timeout once per
+            # resolved address and the host has several.
+            budget_left = max_elapsed - (time.monotonic() - state.started)
+            eff_connect = max(_MIN_EFFECTIVE_TIMEOUT, min(connect_timeout, budget_left))
+            eff_read = max(_MIN_EFFECTIVE_TIMEOUT, min(read_timeout, budget_left))
+
             try:
                 resp = self._session.get(
                     url,
                     params=params,
                     headers=headers,
-                    timeout=(connect_timeout, read_timeout),
+                    timeout=(eff_connect, eff_read),
                 )
             except requests.Timeout as exc:
                 last_result = FetchResult(
@@ -229,89 +384,66 @@ class HttpClient:
                     try:
                         data = resp.json()
                     except ValueError as exc:
+                        snippet = _body_snippet(resp)
+                        if retry_on_soft_throttle:
+                            err_class, reason = _classify_unparseable_body(resp, snippet)
+                        else:
+                            err_class, reason = ErrorClass.PARSE, "soft-throttle sniffing disabled"
                         last_result = FetchResult(
                             ok=False,
                             status=200,
-                            error_class=ErrorClass.PARSE,
-                            error_detail=str(exc)[:200],
+                            error_class=err_class,
+                            error_detail=f"{str(exc)[:80]} | {reason} | body={snippet!r}"[:400],
                             data=None,
                         )
-                        last_result.attempts = state.attempts
-                        last_result.rate_limited_attempts = state.rate_limited_attempts
-                        last_result.elapsed = time.monotonic() - state.started
-                        return last_result
+                        if err_class == ErrorClass.PARSE:
+                            return _finalize(last_result)
+                        # Soft throttle: counts as a rate limit for source_health
+                        # and follows the ordinary bounded-retry path below.
+                        state.rate_limited_attempts += 1
+                        retry_after = _parse_retry_after(
+                            (getattr(resp, "headers", {}) or {}).get("Retry-After"),
+                            cap=retry_after_cap,
+                        )
+                    else:
+                        return _finalize(FetchResult(
+                            ok=True,
+                            status=200,
+                            error_class=ErrorClass.OK,
+                            data=data,
+                        ))
+                else:
+                    status = resp.status_code
+                    err_class = _classify_status(status)
                     last_result = FetchResult(
-                        ok=True,
-                        status=200,
-                        error_class=ErrorClass.OK,
-                        data=data,
+                        ok=False,
+                        status=status,
+                        error_class=err_class,
+                        error_detail=f"HTTP {status}",
                     )
-                    last_result.attempts = state.attempts
-                    last_result.rate_limited_attempts = state.rate_limited_attempts
-                    last_result.elapsed = time.monotonic() - state.started
-                    return last_result
+                    if status == 429:
+                        state.rate_limited_attempts += 1
 
-                status = resp.status_code
-                err_class = _classify_status(status)
-                last_result = FetchResult(
-                    ok=False,
-                    status=status,
-                    error_class=err_class,
-                    error_detail=f"HTTP {status}",
-                )
-                if status == 429:
-                    state.rate_limited_attempts += 1
+                    # Only the statuses we actually documented as transient get
+                    # a retry. This used to test `err_class == CLIENT_ERROR`,
+                    # which let permanent server-side statuses (501 Not
+                    # Implemented, 505 Version Not Supported) and anything
+                    # classified UNKNOWN burn the whole attempt budget while
+                    # `_TRANSIENT_STATUS` sat unused next to a docstring that
+                    # claimed it was the contract.
+                    if status not in _TRANSIENT_STATUS:
+                        return _finalize(last_result)
 
-                # Non-retryable client error: return immediately.
-                if err_class == ErrorClass.CLIENT_ERROR:
-                    last_result.attempts = state.attempts
-                    last_result.rate_limited_attempts = state.rate_limited_attempts
-                    last_result.elapsed = time.monotonic() - state.started
-                    return last_result
+                    # Respect Retry-After if provided (429 or 503).
+                    retry_after = _parse_retry_after(
+                        resp.headers.get("Retry-After"), cap=retry_after_cap
+                    )
 
-                # Respect Retry-After if provided (429 or 503).
-                retry_after = _parse_retry_after(
-                    resp.headers.get("Retry-After"), cap=retry_after_cap
-                )
-                delay = retry_after if retry_after is not None else _backoff_delay(
-                    state.attempts, base=backoff_base, cap=backoff_cap,
-                )
-
-                if state.attempts >= attempts:
-                    last_result.attempts = state.attempts
-                    last_result.rate_limited_attempts = state.rate_limited_attempts
-                    last_result.elapsed = time.monotonic() - state.started
-                    return last_result
-
-                remaining = max_elapsed - (time.monotonic() - state.started)
-                if delay >= remaining:
-                    last_result.attempts = state.attempts
-                    last_result.rate_limited_attempts = state.rate_limited_attempts
-                    last_result.elapsed = time.monotonic() - state.started
-                    return last_result
-
-                _log.info(
-                    "retryable %s from %s (attempt %d/%d, sleeping %.2fs)",
-                    err_class, url, state.attempts, attempts, delay,
-                )
-                _sleep(delay)
-                continue
-
-            # timeout / network branches share the retry decision
-            if state.attempts >= attempts:
-                last_result.attempts = state.attempts
-                last_result.rate_limited_attempts = state.rate_limited_attempts
-                last_result.elapsed = time.monotonic() - state.started
-                return last_result
-            delay = _backoff_delay(state.attempts, base=backoff_base, cap=backoff_cap)
-            remaining = max_elapsed - (time.monotonic() - state.started)
-            if delay >= remaining:
-                last_result.attempts = state.attempts
-                last_result.rate_limited_attempts = state.rate_limited_attempts
-                last_result.elapsed = time.monotonic() - state.started
-                return last_result
+            delay = _next_delay(retry_after)
+            if delay is None:
+                return _finalize(last_result)
             _log.info(
-                "retryable %s (attempt %d/%d, sleeping %.2fs)",
-                last_result.error_class, state.attempts, attempts, delay,
+                "retryable %s from %s (attempt %d/%d, sleeping %.2fs)",
+                last_result.error_class, url, state.attempts, attempts, delay,
             )
             _sleep(delay)

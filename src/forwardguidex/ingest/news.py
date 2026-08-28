@@ -10,6 +10,7 @@ transient rate-limit burst from a legitimate zero-result day.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -21,18 +22,70 @@ from .http_client import ErrorClass, HttpClient
 
 GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 
-# GDELT throttles aggressively (documented ~10 QPM soft ceiling). We serialize
-# our topic queries with a short spacing to avoid self-inflicted 429 bursts.
+# GDELT throttles aggressively and is *slow*. Measured directly against
+# api.gdeltproject.org on 2026-08-28, one ArtList query at a time:
 #
-# Empirically (CI preview 30767576487): GDELT's TLS handshake alone can take
-# 5-10 s from GitHub Actions runners, so we give it plenty of headroom on both
-# connect and read. ``GDELT_ATTEMPTS = 3`` keeps the worst-case per-query time
-# bounded (~3 * (25 s read + backoff up to 30 s) ~= 3 min budget) while still
-# absorbing a single 429 or transient blip.
-GDELT_MIN_SPACING_SEC = 1.5
-GDELT_ATTEMPTS = 3
-GDELT_CONNECT_TIMEOUT = 20.0
-GDELT_READ_TIMEOUT = 25.0
+#   query 1 -> 200 in 25.9 s
+#   query 2 -> 200 in 24.4 s   (6 s spacing)
+#   query 3 -> ConnectionReset after 21.0 s
+#
+# So a full ArtList response routinely needs ~25 s. The previous
+# ``GDELT_READ_TIMEOUT = 25.0`` sat exactly on that boundary, which is why CI run
+# 33116396414 lost `fed` and `bce` to `class=timeout` on all three attempts: we
+# were aborting responses that were about to arrive. Give the read phase real
+# headroom (the per-query ``max_elapsed`` and ``GDELT_TOTAL_BUDGET_SEC`` below are
+# what actually bound the cost) and keep the connect timeout tight, since the TLS
+# handshake itself is fast.
+#
+# Throttling shows up in three different disguises — HTTP 429, a TCP reset
+# (``ErrorClass.NETWORK``), and HTTP 200 with a non-JSON body
+# (``retry_on_soft_throttle``) — so all three feed the adaptive spacing below.
+GDELT_MIN_SPACING_SEC = 6.0
+GDELT_ATTEMPTS = 4
+# 20.0 s was the single biggest cause of lost topics. urllib3 v2 keeps the
+# *connect* timeout on the socket until the first response byte arrives, and
+# GDELT regularly thinks for 20-30 s before answering — so a slow-but-healthy
+# query surfaced as `Read timed out. (read timeout=20.0)`, i.e. the connect
+# value, which is why the previous diagnosis chased TLS handshakes. Verified
+# 2026-08-28: connect=20 -> 0/10 topics; connect=45 -> topics answer in ~26 s.
+GDELT_CONNECT_TIMEOUT = 45.0
+GDELT_READ_TIMEOUT = 60.0
+# Full-jitter backoff with base 1.0 s meant retries after ~0.5 s / ~1 s — far
+# too fast for a provider that wants seconds of headroom. See
+# `http_client._backoff_delay` (equal jitter as of 2026-08-28).
+GDELT_BACKOFF_BASE = 5.0
+GDELT_MAX_ELAPSED_SEC = 150.0
+
+# Adaptive spacing: every throttle signal (HTTP 429 *or* the 200 + non-JSON soft
+# throttle GDELT actually uses) widens the gap before the next topic query, and a
+# clean run narrows it back. Fixed 1.5 s spacing was not enough on CI run
+# 33116396414 — once GDELT started throttling we kept hammering at the same rate
+# for the remaining topics.
+GDELT_MAX_SPACING_SEC = 12.0
+GDELT_SPACING_BACKOFF = 2.0     # multiplier applied after a throttled query
+GDELT_SPACING_RECOVERY = 0.75   # multiplier applied after a clean query
+
+# Whole-domain wall-clock budget. Worst case without it is
+# len(queries) * GDELT_MAX_ELAPSED_SEC (10 * 150 s = 25 min) — nearly the whole
+# `daily.build-validate-deploy` job budget, spent on news alone. Topics not
+# reached are recorded as `skipped` failures so the health rollup stays honest.
+GDELT_TOTAL_BUDGET_SEC = 600.0
+
+# Circuit breaker. When GDELT refuses a client it refuses it for a while: the
+# 2026-08-28 probe burned 1635 s across all 10 topics for zero rows, every one
+# failing with a reset or a 429. Once this many topics have failed back-to-back
+# under pressure, stop asking and leave the remaining wall-clock to the rest of
+# the pipeline — the outcome is identical and the snapshot is FAILED either way.
+GDELT_CONSECUTIVE_FAILURE_LIMIT = 4
+
+# Failure classes that mean "the provider is under pressure" and should widen
+# the spacing for the *next* topic, not just retry the current one.
+_PRESSURE_CLASSES = frozenset({
+    ErrorClass.RATE_LIMITED,
+    ErrorClass.TIMEOUT,
+    ErrorClass.NETWORK,
+    ErrorClass.SERVER_ERROR,
+})
 
 _log = logging.getLogger(__name__)
 
@@ -116,6 +169,8 @@ def _fetch_query(
     *,
     maxrecords: int = 50,
     timespan: str = "1d",
+    spacing: float = GDELT_MIN_SPACING_SEC,
+    max_elapsed: float | None = None,
 ) -> tuple[list[dict], QueryOutcome]:
     params = {
         "query": query, "mode": "ArtList", "format": "json",
@@ -127,7 +182,16 @@ def _fetch_query(
         attempts=GDELT_ATTEMPTS,
         connect_timeout=GDELT_CONNECT_TIMEOUT,
         read_timeout=GDELT_READ_TIMEOUT,
-        min_spacing=GDELT_MIN_SPACING_SEC,
+        backoff_base=GDELT_BACKOFF_BASE,
+        max_elapsed=min(
+            GDELT_MAX_ELAPSED_SEC,
+            max_elapsed if max_elapsed is not None else GDELT_MAX_ELAPSED_SEC,
+        ),
+        min_spacing=spacing,
+        # GDELT answers a throttled request with HTTP 200 and a plain-text /
+        # HTML body, never a 429. Without this the query is dropped as a
+        # permanent `parse` error on the first attempt.
+        retry_on_soft_throttle=True,
     )
     outcome = QueryOutcome(
         key=key,
@@ -165,20 +229,65 @@ def ingest_news_with_report(con) -> NewsCollectionReport:
     rows: list[dict] = []
 
     client = HttpClient()
+    spacing = GDELT_MIN_SPACING_SEC
+    consecutive_pressure_failures = 0
+    deadline = time.monotonic() + GDELT_TOTAL_BUDGET_SEC
     try:
         for item in load_universe().get("gdelt_queries", []):
             key, query = item["key"], item["query"]
             report.attempted_queries += 1
-            articles, outcome = _fetch_query(client, key, query)
+
+            remaining = deadline - time.monotonic()
+            if consecutive_pressure_failures >= GDELT_CONSECUTIVE_FAILURE_LIMIT:
+                _log.warning(
+                    "[news] %s skipped: provider circuit breaker open after %d consecutive failures",
+                    key, consecutive_pressure_failures,
+                )
+                report.per_query.append(QueryOutcome(
+                    key=key, status="skipped", attempts=0,
+                    error_detail=(
+                        f"circuit breaker open after {consecutive_pressure_failures} "
+                        "consecutive provider failures"
+                    ),
+                ))
+                report.failed_queries += 1
+                continue
+            if remaining <= spacing:
+                # Out of wall-clock budget: record the topic as skipped rather
+                # than silently shrinking the universe, and keep going so the
+                # counters in `raw_news_health` still add up.
+                _log.warning("[news] %s skipped: news budget exhausted", key)
+                report.per_query.append(QueryOutcome(
+                    key=key, status="skipped", attempts=0,
+                    error_detail=f"news budget of {GDELT_TOTAL_BUDGET_SEC:.0f}s exhausted",
+                ))
+                report.failed_queries += 1
+                continue
+
+            articles, outcome = _fetch_query(
+                client, key, query, spacing=spacing, max_elapsed=remaining,
+            )
             report.per_query.append(outcome)
 
             if outcome.status == ErrorClass.OK:
                 report.successful_queries += 1
                 report.last_success_at = now.isoformat()
+                spacing = max(GDELT_MIN_SPACING_SEC, spacing * GDELT_SPACING_RECOVERY)
+                consecutive_pressure_failures = 0
             else:
                 report.failed_queries += 1
-                if outcome.rate_limited_attempts > 0:
+                throttled = (
+                    outcome.rate_limited_attempts > 0
+                    or outcome.status == ErrorClass.RATE_LIMITED
+                )
+                if throttled:
                     report.rate_limited_queries += 1
+                if throttled or outcome.status in _PRESSURE_CLASSES:
+                    # Back off the *next* topic too: GDELT throttles per client,
+                    # not per query. A TCP reset or a timeout is the same signal
+                    # as a 429 — it just arrives in a different disguise.
+                    spacing = min(GDELT_MAX_SPACING_SEC, spacing * GDELT_SPACING_BACKOFF)
+                    consecutive_pressure_failures += 1
 
             for a in articles:
                 rows.append({

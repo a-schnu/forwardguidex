@@ -1,8 +1,6 @@
 """Per-asset-class freshness + calendar edge cases."""
 from datetime import datetime, timezone
 
-import pytest
-
 from forwardguidex.serve import calendar as cal
 
 NOW_SAT = datetime(2026, 8, 1, 8, 0, tzinfo=timezone.utc)      # Sat; latest session Fri 07-31

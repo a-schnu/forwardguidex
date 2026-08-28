@@ -30,7 +30,9 @@ dependencies = [
 publish = ["firebase-admin>=6.5"]
 # Legacy Streamlit dev dashboard (superseded by the static app/ build).
 dashboard = ["streamlit>=1.33", "plotly>=5.20"]
-dev = ["pytest>=8.0", "ruff>=0.4"]
+# `packaging` is used by tests/test_locks.py to check the lockfiles against the
+# specifiers declared above; it is not a runtime dependency.
+dev = ["pytest>=8.0", "ruff>=0.4", "packaging>=24.0"]
 
 [project.scripts]
 fwdx = "forwardguidex.cli:main"
@@ -43,6 +45,34 @@ forwardguidex = ["serve/snapshot_schema.json"]
 
 [tool.ruff]
 line-length = 100
+
+# Explicit rule selection: ruff's *default* set changes between releases, so
+# relying on it means a routine `ruff` bump can turn a green branch red (or,
+# worse, silently stop enforcing something). `forwardguidex-ci` gates on this.
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import sorting
+    "B",        # flake8-bugbear — real bug patterns, not style
+    "BLE",      # blind `except Exception` — allowed, but each one must justify itself
+    "S",        # flake8-bandit — this pipeline holds API tokens and deploys prod
+    "RUF",      # ruff-specific
+]
+ignore = [
+    # Long lines are tolerated: most offenders are dense literal tables and
+    # explanatory comments where wrapping hurts readability. `line-length` above
+    # still applies to anything auto-formatted.
+    "E501",
+]
+# TODO: enable "DTZ" (naive datetime). It currently flags 6 real ambiguities in
+# rates.py / brief.py / rights.py where a *business date* is derived from
+# `date.today()`; each needs a deliberate decision about which timezone defines
+# the trading day, so it is tracked separately rather than papered over.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests are allowed to assert, and to hardcode throwaway credentials in fixtures.
+"tests/**" = ["S101", "S105", "S106"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

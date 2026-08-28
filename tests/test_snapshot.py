@@ -175,9 +175,10 @@ def test_demo_semis_apple_first():
 
 def test_build_snapshot_orders_members_by_universe():
     """Sector member order follows the universe file, not SQL/insert order."""
+    from datetime import datetime, timezone
+
     import duckdb
     import pandas as pd
-    from datetime import datetime, timezone
 
     from forwardguidex import db as D
     from forwardguidex.transform import marts
@@ -294,9 +295,10 @@ def test_demo_events_do_not_affect_freshness():
 
 
 def test_build_snapshot_derives_cb_events_from_bis():
+    from datetime import datetime, timezone
+
     import duckdb
     import pandas as pd
-    from datetime import datetime, timezone
 
     from forwardguidex import db as D
     from forwardguidex.transform import marts

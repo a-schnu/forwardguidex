@@ -45,6 +45,21 @@ pip install -e ".[dev]"     # add ".[publish]" for the Firestore archive step (f
 cp .env.example .env         # then fill in keys
 ```
 
+### Dependency locks
+
+CI never resolves dependency ranges: it installs from hash-pinned lockfiles with
+`pip install --require-hashes --only-binary=:all:`, so an upstream release cannot reach production
+without an explicit, reviewed lock change.
+
+```bash
+pip install uv
+./scripts/lock-deps.sh      # regenerates requirements/{core,publish,dev}.lock for cp311/manylinux
+```
+
+Run it after **any** edit to `[project.dependencies]` or an optional-dependency group, and commit
+`requirements/*.lock` in the same commit as `pyproject.toml` — the `locks` job in
+[`ci.yml`](.github/workflows/ci.yml) regenerates them and fails on drift.
+
 Keys: [OpenRouter](https://openrouter.ai/keys) and a Telegram bot via @BotFather.
 **US Treasury and NY Fed need no key. GDELT needs no key. FRED is no longer used** (removed for
 compliance — its terms conflict with persistence + LLM use).
@@ -133,6 +148,8 @@ footer, Telegram brief). They are never LLM-generated or paraphrased.
   `run-daily → export → validate → Direct Upload → smoke → publish (WIF)`.
 - [`.github/workflows/deploy-app.yml`](.github/workflows/deploy-app.yml) — on `app/**` push /
   manual: revalidate last-known-good → Direct Upload → smoke → rollback on failure.
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — every push / PR: `ruff` + the full test
+  suite, plus a lockfile-drift check. Secretless and side-effect free.
 
 Both share the `forwardguidex-production-deployment` concurrency group (`cancel-in-progress:false`),
 run in the protected `production` environment, use SHA-pinned actions, and grant `id-token:write`

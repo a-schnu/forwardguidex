@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -19,7 +20,6 @@ from forwardguidex.ingest import http_client as httpc
 from forwardguidex.ingest import news as newsmod
 from forwardguidex.serve import snapshot as S
 from forwardguidex.serve import validate as V
-
 
 NOW = datetime(2026, 8, 1, 8, 0, tzinfo=timezone.utc)
 
@@ -53,7 +53,7 @@ def _make_result(*, ok, articles=0, status=200, err=httpc.ErrorClass.OK,
 
 
 class _StubUniverse:
-    QUERIES = [
+    QUERIES: ClassVar[list[dict]] = [
         {"key": "fed",    "query": "Q-FED"},
         {"key": "bce",    "query": "Q-BCE"},
         {"key": "petrol", "query": "Q-OIL"},
@@ -157,3 +157,124 @@ def test_validator_rejects_fresh_when_stale_fallback():
     errs = V.validate_payload(payload, raw, mode="LOCAL_DEMO", now=NOW,
                               snap_path=Path("x.json"), manifest_path=None)
     assert any("STALE_FALLBACK" in e and "freshness=FRESH" in e for e in errs), errs
+
+
+# ---------------------------------------------------------------------------
+# Adaptive spacing + whole-domain budget (2026-08-28 hardening).
+# ---------------------------------------------------------------------------
+
+class _RecordingClient(_StubClient):
+    """Stub client that records the ``min_spacing`` used for each query."""
+
+    def __init__(self, per_key):
+        super().__init__(per_key)
+        self.spacings: list[float] = []
+
+    def fetch_json(self, url, *, params=None, **kw):
+        self.spacings.append(kw.get("min_spacing"))
+        return super().fetch_json(url, params=params, **kw)
+
+
+def _install_recording(monkeypatch, per_key):
+    rec = _RecordingClient(per_key)
+    monkeypatch.setattr(newsmod, "HttpClient", lambda: rec)
+    monkeypatch.setattr(newsmod, "load_universe", _StubUniverse.load)
+    monkeypatch.setattr(newsmod, "upsert", lambda con, table, df, keys: len(df))
+    monkeypatch.setattr(newsmod, "_persist_health", lambda con, ts, r: None)
+    return rec
+
+
+def test_spacing_widens_after_throttle_and_recovers(monkeypatch):
+    per_key = {
+        "Q-FED": _make_result(ok=False, status=429, err=httpc.ErrorClass.RATE_LIMITED, rate_limited=3),
+        "Q-BCE": _make_result(ok=True, articles=3),
+        "Q-OIL": _make_result(ok=True, articles=1),
+    }
+    rec = _install_recording(monkeypatch, per_key)
+    newsmod.ingest_news_with_report(con=None)
+
+    base = newsmod.GDELT_MIN_SPACING_SEC
+    assert rec.spacings[0] == base
+    # throttled -> back off the *next* topic too
+    assert rec.spacings[1] == pytest.approx(base * newsmod.GDELT_SPACING_BACKOFF)
+    # clean -> narrow back, but never below the floor
+    assert rec.spacings[2] == pytest.approx(
+        max(base, base * newsmod.GDELT_SPACING_BACKOFF * newsmod.GDELT_SPACING_RECOVERY)
+    )
+
+
+def test_soft_throttle_counts_as_rate_limited_query(monkeypatch):
+    """A 200 + non-JSON throttle must not be filed as a plain failure."""
+    per_key = {
+        "Q-FED": _make_result(ok=True, articles=2),
+        "Q-BCE": httpc.FetchResult(
+            ok=False, status=200, error_class=httpc.ErrorClass.RATE_LIMITED,
+            error_detail="soft throttle", attempts=3, rate_limited_attempts=3,
+        ),
+        "Q-OIL": _make_result(ok=True, articles=1),
+    }
+    _install_stub(monkeypatch, per_key)
+    r = newsmod.ingest_news_with_report(con=None)
+    assert r.status == "DEGRADED"
+    assert r.rate_limited_queries == 1
+    assert r.failed_queries == 1
+
+
+def test_news_budget_exhaustion_skips_remaining_topics(monkeypatch):
+    """Topics we never reach are recorded, not silently dropped from the universe."""
+    per_key = {
+        "Q-FED": _make_result(ok=True, articles=4),
+        "Q-BCE": _make_result(ok=True, articles=4),
+        "Q-OIL": _make_result(ok=True, articles=4),
+    }
+    _install_stub(monkeypatch, per_key)
+
+    # monotonic() calls: deadline setup, then once per topic.
+    ticks = iter([0.0, 0.0, 999.0, 999.0])
+
+    class _Clock:
+        monotonic = staticmethod(lambda: next(ticks))
+
+    monkeypatch.setattr(newsmod, "time", _Clock)
+    r = newsmod.ingest_news_with_report(con=None)
+
+    assert r.attempted_queries == 3
+    assert r.successful_queries == 1
+    assert r.failed_queries == 2
+    assert [q.status for q in r.per_query] == ["ok", "skipped", "skipped"]
+    assert r.status == "DEGRADED"
+    # skipped topics surface in meta.source_health.gdelt.errors[]
+    classes = {e["class"] for e in r.to_metadata()["errors"]}
+    assert classes == {"skipped"}
+
+
+def test_circuit_breaker_stops_asking_a_refusing_provider(monkeypatch):
+    """1635 s for zero rows (2026-08-28 probe) must not be repeatable."""
+    monkeypatch.setattr(newsmod, "GDELT_CONSECUTIVE_FAILURE_LIMIT", 2)
+    reset = httpc.FetchResult(
+        ok=False, status=None, error_class=httpc.ErrorClass.NETWORK,
+        error_detail="ConnectionResetError", attempts=4,
+    )
+    per_key = {"Q-FED": reset, "Q-BCE": reset, "Q-OIL": reset}
+    rec = _install_recording(monkeypatch, per_key)
+    r = newsmod.ingest_news_with_report(con=None)
+
+    # Third topic is never requested.
+    assert len(rec.spacings) == 2
+    assert [q.status for q in r.per_query] == ["network", "network", "skipped"]
+    assert r.attempted_queries == 3
+    assert r.failed_queries == 3
+    assert r.status == "FAILED"
+
+
+def test_a_success_resets_the_circuit_breaker(monkeypatch):
+    monkeypatch.setattr(newsmod, "GDELT_CONSECUTIVE_FAILURE_LIMIT", 2)
+    per_key = {
+        "Q-FED": _make_result(ok=False, status=503, err=httpc.ErrorClass.SERVER_ERROR),
+        "Q-BCE": _make_result(ok=True, articles=2),
+        "Q-OIL": _make_result(ok=False, status=503, err=httpc.ErrorClass.SERVER_ERROR),
+    }
+    rec = _install_recording(monkeypatch, per_key)
+    r = newsmod.ingest_news_with_report(con=None)
+    assert len(rec.spacings) == 3          # breaker never opened
+    assert r.status == "DEGRADED"

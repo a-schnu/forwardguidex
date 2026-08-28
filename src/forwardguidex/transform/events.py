@@ -124,7 +124,7 @@ def cb_events(con, cb_specs: list[dict]) -> list[dict]:
             direction, change_bp, as_of = "hold", 0, None
         else:
             old, new, changed_on = last_change
-            change_bp = int(round((float(new) - float(old)) * 100))
+            change_bp = round((float(new) - float(old)) * 100)
             direction = "hike" if float(new) > float(old) else "cut"
             as_of = _date_str(changed_on)
 

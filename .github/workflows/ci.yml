@@ -1,0 +1,90 @@
+name: forwardguidex-ci
+
+# Fast, read-only gate on every push / PR. Until 2026-08-28 nothing in CI ran the
+# test suite at all: `daily.yml` and `deploy-app.yml` go straight from checkout to
+# a production deploy, so a regression in the ingest/validate layer was only ever
+# caught by the fail-closed smoke test *after* the bytes were live on Cloudflare.
+#
+# Deliberately does NOT touch any secret, deploy target or the production lock.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Per-ref, cancellable: this workflow has no external side effects, so a newer
+  # push should supersede an in-flight run (unlike the production workflows).
+  group: forwardguidex-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ruff + pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install (dev extra, hash-pinned)
+        run: |
+          set -euo pipefail
+          pip install --require-hashes --only-binary=:all: -r requirements/dev.lock
+          pip install --no-deps -e .
+          pip check
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Tests
+        # No network: every provider call in the suite is stubbed (and
+        # tests/test_locks.py checks requirements/*.lock against pyproject.toml
+        # offline — regenerating and diffing would make this gate depend on the
+        # live PyPI index, so an unrelated upstream release could fail a PR).
+        run: python -m pytest -q
+
+  install-locks:
+    name: production locks install cleanly (${{ matrix.lock }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        lock: [core, publish]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install from the lock exactly as production does
+        # The `test` job only exercises dev.lock. core.lock and publish.lock are
+        # what daily.yml / deploy-app.yml install, and a broken one there fails
+        # the production run (fail-closed, but the daily refresh is lost). Prove
+        # them here instead, with no secrets and no deploy target.
+        run: |
+          set -euo pipefail
+          pip install --require-hashes --only-binary=:all: -r requirements/${{ matrix.lock }}.lock
+          pip install --no-deps .
+          pip check
+          fwdx --help > /dev/null
+          python -c "import forwardguidex, forwardguidex.serve.snapshot, forwardguidex.ingest.news"
