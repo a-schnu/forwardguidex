@@ -115,9 +115,20 @@ jobs:
           node --version
           if node --test --test-reporter=tap tests/gate/middleware.test.mjs > gate.tap 2>&1; then
             cat gate.tap
+            # Guard the guard: a runner that discovers no tests also exits 0, and
+            # a green job that asserted nothing is worse than no job at all.
+            # (Passing the DIRECTORY to --test does exactly that here, which is
+            # why the file is named explicitly above.)
+            PASS=$(grep -m1 -E "^# pass [0-9]+" gate.tap | tr -dc "0-9")
+            if [ "${PASS:-0}" -lt 20 ]; then
+              echo "::error::gate suite reported only ${PASS:-0} passing tests; expected at least 20."
+              exit 1
+            fi
+            echo "gate suite: ${PASS} passing."
             exit 0
           fi
           cat gate.tap
+          # Raw job logs need repo-admin rights to download; annotations do not.
           grep -n "" gate.tap | head -n 45 | while IFS= read -r line; do
             echo "::error::$line"
           done
