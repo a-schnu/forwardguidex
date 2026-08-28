@@ -129,14 +129,14 @@ def _bis_rows(cb_rates: list[dict], n: int = 10) -> pd.DataFrame:
         return pd.DataFrame()
     rows: list[dict] = []
     for rec in df.itertuples(index=False):
-        spec = by_area.get(str(getattr(rec, "REF_AREA")))
+        spec = by_area.get(str(rec.REF_AREA))
         if spec is None:
             continue
         rows.append({
             "series_id": spec["series_id"],
             "name": spec["name"],
-            "date": getattr(rec, "TIME_PERIOD"),
-            "value": getattr(rec, "OBS_VALUE"),
+            "date": rec.TIME_PERIOD,
+            "value": rec.OBS_VALUE,
             "source": "BIS",
         })
     if not rows:

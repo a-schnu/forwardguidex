@@ -335,7 +335,7 @@ def archive(snapshot_path, manifest_path, *, provenance: dict) -> ArchiveResult:
         try:
             doc_ref.create(document)
             return _result("CREATED", attempt, metadata)
-        except Exception as exc:  # noqa: BLE001 - classified below
+        except Exception as exc:
             if _is_already_exists(exc):
                 existing = doc_ref.get()
                 existing_data = existing.to_dict() if existing.exists else {}

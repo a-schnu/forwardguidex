@@ -1,0 +1,88 @@
+name: forwardguidex-ci
+
+# Fast, read-only gate on every push / PR. Until 2026-08-28 nothing in CI ran the
+# test suite at all: `daily.yml` and `deploy-app.yml` go straight from checkout to
+# a production deploy, so a regression in the ingest/validate layer was only ever
+# caught by the fail-closed smoke test *after* the bytes were live on Cloudflare.
+#
+# Deliberately does NOT touch any secret, deploy target or the production lock.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Per-ref, cancellable: this workflow has no external side effects, so a newer
+  # push should supersede an in-flight run (unlike the production workflows).
+  group: forwardguidex-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ruff + pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install (dev extra, hash-pinned)
+        run: |
+          set -euo pipefail
+          pip install --require-hashes --only-binary=:all: -r requirements/dev.lock
+          pip install --no-deps -e .
+          pip check
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Tests
+        # No network: every provider call in the suite is stubbed. A test that
+        # starts reaching a real API should fail here, loudly.
+        run: python -m pytest -q
+
+  locks:
+    name: dependency locks are in sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install "uv==0.12.7"
+
+      - name: Regenerate locks and fail on drift
+        # Guards the P1.2 invariant: a dependency added to pyproject.toml without
+        # re-running scripts/lock-deps.sh would otherwise only explode at the next
+        # production install (--require-hashes rejects unlisted packages).
+        run: |
+          set -euo pipefail
+          ./scripts/lock-deps.sh
+          if ! git diff --quiet -- requirements/; then
+            echo "::error::requirements/*.lock are stale. Run ./scripts/lock-deps.sh and commit the result."
+            git --no-pager diff --stat -- requirements/
+            exit 1
+          fi
+          echo "Locks in sync."

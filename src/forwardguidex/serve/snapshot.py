@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from datetime import datetime, timezone
 
@@ -25,6 +26,8 @@ from ..transform import events as fevents
 from ..transform import marts
 from . import calendar as fcal
 from . import rights
+
+_log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 CADENCE = "EOD"
@@ -377,8 +380,11 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
         ).fetchone()
         if row:
             brief = {"markdown": row[0], "created_at": _iso(row[1])}
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 - missing table on a fresh warehouse is expected
+        # Fail-open on shape (a brief-less snapshot is still valid) but never
+        # silently: a swallowed error here made an empty Morning Brief
+        # indistinguishable from a genuinely empty `brief_history`.
+        _log.warning("brief_history unavailable, snapshot ships without a brief: %s", exc)
 
     # Phase-2 event sections (central-bank decisions / earnings / catalysts).
     # Each is derived defensively (missing source table -> []) and is deliberately
