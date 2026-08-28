@@ -88,3 +88,24 @@ jobs:
           pip check
           fwdx --help > /dev/null
           python -c "import forwardguidex, forwardguidex.serve.snapshot, forwardguidex.ingest.news"
+
+  gate:
+    name: access gate behaviour
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Test functions/_middleware.js
+        # Uses the runner's preinstalled Node and its built-in test runner, so no
+        # extra action and no npm install. The gate is the one piece of this
+        # project where a mistake means publishing the dashboard, and smoke.py
+        # only checks it AFTER the bytes are live on Cloudflare.
+        run: |
+          set -euo pipefail
+          node --version
+          node --test tests/gate/
