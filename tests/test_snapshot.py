@@ -327,3 +327,59 @@ def test_build_snapshot_derives_cb_events_from_bis():
     assert ecb["change_bp"] == -25 and ecb["rate"] == 3.75
     # empty event sections still present as arrays (frontend hides them)
     assert p["earnings"] == [] and p["triggers"] == []
+
+
+# ---------------------------------------------------------------------------
+# Headline selection: fairness across topics (2026-08-28).
+#
+# The published snapshot carries only 12 headlines, and they are the whole
+# durable record of a day's news — the warehouse is rebuilt from scratch on
+# every CI run. Choosing them by pure global recency let one busy topic take
+# most of the slots.
+# ---------------------------------------------------------------------------
+
+def _cand(topic, n, day="20260828"):
+    return [{"topic": topic, "title": f"{topic}-{i}", "domain": "x.com",
+             "url": f"https://x.com/{topic}/{i}",
+             "seendate": f"{day}T{23 - i:02d}0000Z"} for i in range(n)]
+
+
+def test_select_headlines_gives_every_topic_a_slot_before_seconds():
+    # `fed` is loud enough to fill the cap on its own under recency-only selection.
+    candidates = _cand("fed", 20) + _cand("bce", 3) + _cand("petrolio", 2)
+    picked = S._select_headlines(candidates, cap=6)
+    assert len(picked) == 6
+    per_topic = {}
+    for h in picked:
+        per_topic[h["topic"]] = per_topic.get(h["topic"], 0) + 1
+    assert set(per_topic) == {"fed", "bce", "petrolio"}
+    # nobody gets a second slot while a topic is still on zero
+    assert max(per_topic.values()) - min(per_topic.values()) <= 1
+
+
+def test_select_headlines_falls_back_to_a_single_topic_when_it_is_all_we_have():
+    """A day where only one GDELT query succeeded must still fill the snapshot."""
+    picked = S._select_headlines(_cand("fed", 30), cap=12)
+    assert len(picked) == 12
+    assert {h["topic"] for h in picked} == {"fed"}
+
+
+def test_select_headlines_stops_when_candidates_run_out():
+    picked = S._select_headlines(_cand("fed", 2) + _cand("bce", 1), cap=12)
+    assert len(picked) == 3
+
+
+def test_select_headlines_output_is_newest_first():
+    picked = S._select_headlines(_cand("fed", 5) + _cand("bce", 5), cap=8)
+    dates = [h["seendate"] for h in picked]
+    assert dates == sorted(dates, reverse=True)
+
+
+def test_select_headlines_keeps_newest_within_a_topic():
+    picked = S._select_headlines(_cand("fed", 5), cap=2)
+    # _cand emits newest first; the two kept must be those, not arbitrary ones.
+    assert [h["title"] for h in picked] == ["fed-0", "fed-1"]
+
+
+def test_select_headlines_empty_pool():
+    assert S._select_headlines([], cap=12) == []

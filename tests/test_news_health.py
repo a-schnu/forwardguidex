@@ -278,3 +278,30 @@ def test_a_success_resets_the_circuit_breaker(monkeypatch):
     r = newsmod.ingest_news_with_report(con=None)
     assert len(rec.spacings) == 3          # breaker never opened
     assert r.status == "DEGRADED"
+
+
+def test_gdelt_query_window_and_page_size_are_sent(monkeypatch):
+    """A wider window is useless without a bigger page: GDELT truncates DateDesc."""
+    seen = {}
+
+    class _ParamSpy:
+        def fetch_json(self, url, *, params=None, **_kw):
+            seen.update(params)
+            return _make_result(ok=True, articles=1)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(newsmod, "HttpClient", _ParamSpy)
+    monkeypatch.setattr(newsmod, "load_universe",
+                        lambda: {"gdelt_queries": [{"key": "fed", "query": "Q-FED"}]})
+    monkeypatch.setattr(newsmod, "upsert", lambda con, table, df, keys: len(df))
+    monkeypatch.setattr(newsmod, "_persist_health", lambda con, ts, r: None)
+
+    newsmod.ingest_news_with_report(con=None)
+    assert seen["timespan"] == newsmod.GDELT_TIMESPAN
+    assert seen["maxrecords"] == newsmod.GDELT_MAXRECORDS
+    assert seen["sort"] == "DateDesc"
+    # A window wider than one day is the whole point — guard against a silent revert.
+    assert newsmod.GDELT_TIMESPAN != "1d"
+    assert newsmod.GDELT_MAXRECORDS >= 150
