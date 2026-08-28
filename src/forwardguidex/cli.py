@@ -186,6 +186,38 @@ def cmd_publish(args) -> None:
         )
 
 
+def cmd_retrieve_lkg(args) -> None:
+    """Materialize the archived last-known-good snapshot into a directory.
+
+    The deploy-app workflow uses this to redeploy app/ with the last snapshot
+    that was actually proven live, without rebuilding data. It exists as a CLI
+    command so that `publish.retrieve_last_known_good` — which is unit-tested
+    and enforces the full record contract — is the ONE implementation of
+    "which snapshot is last-known-good", instead of being paraphrased in YAML.
+
+    Fails closed (exit 1) when no record qualifies: per R4-5.b we never fall
+    back to DEMO data, and never to a VALIDATED_NOT_DEPLOYED record.
+    """
+    from .serve import publish
+
+    record = publish.retrieve_last_known_good(collection=args.collection)
+    if record is None:
+        print(
+            "No SMOKE_TESTED, non-demo snapshot found in the Firestore archive. "
+            "Refusing to deploy — never falling back to DEMO data.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    manifest = publish.write_last_known_good(record, args.out_dir)
+    metadata = record["metadata"]
+    print(f"Resolved last-known-good {manifest['snapshot']} into {args.out_dir}")
+    print(f"  artifact_sha256: {manifest['artifact_sha256']}")
+    print(f"  generated_at:    {manifest['generated_at']} (data)")
+    print(f"  deployed_at:     {metadata.get('deployed_at')} (archive)")
+    print(f"  git_commit:      {metadata.get('git_commit')}")
+
+
 def cmd_decommission_fred(args) -> None:
     """One-time FRED decommission (idempotent). Logs what it removed."""
     con = db.connect()
@@ -275,6 +307,13 @@ def main(argv=None) -> None:
                     help="SMOKE_TESTED (default, also via $FGX_RELEASE_STATUS) "
                          "or VALIDATED_NOT_DEPLOYED")
     pp.set_defaults(func=cmd_publish)
+
+    pr = sub.add_parser("retrieve-lkg",
+                        help="write the archived last-known-good snapshot + manifest to a dir")
+    pr.add_argument("--out-dir", required=True)
+    pr.add_argument("--collection", default=None,
+                    help="Firestore collection override (else settings)")
+    pr.set_defaults(func=cmd_retrieve_lkg)
 
     pd = sub.add_parser("decommission-fred", help="one-time FRED cleanup (idempotent)")
     pd.add_argument("--purge-briefs", action="store_true")

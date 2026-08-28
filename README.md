@@ -51,6 +51,12 @@ Nothing that failed *validation* is ever archived. Full contract — including w
 same-day re-run can leave `release_status` understated (never overstated) — in the
 [`serve/publish.py`](src/forwardguidex/serve/publish.py) module docstring.
 
+Selecting that record is `fwdx retrieve-lkg`, and it is the **only** implementation: the code-only
+deploy path (`.github/workflows/deploy-app.yml`, triggered by `app/**` changes) shells out to it
+rather than paraphrasing the query in YAML. It writes the archived bytes back verbatim and rebuilds
+`latest.json` through the same `build_manifest()` that `fwdx export` uses, so a redeployed snapshot
+is byte-identical to the one that was originally published — manifest included.
+
 ## Setup
 
 ```bash
@@ -92,6 +98,7 @@ fwdx export --out-dir out       # build snapshot.<hash>.json + latest.json from 
 fwdx export --demo --out-dir app/data   # (re)generate the local demo bundle
 fwdx validate out/snapshot.*.json       # fail-closed validation (non-zero exit on any error)
 fwdx publish out/snapshot.*.json        # archive to Firestore (create-only, via WIF; needs [publish])
+fwdx retrieve-lkg --out-dir resolved    # write the last-known-good bundle back out (needs [publish])
 fwdx decommission-fred          # one-time FRED cleanup (idempotent)
 ```
 

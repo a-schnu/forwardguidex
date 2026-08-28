@@ -215,7 +215,8 @@ def test_demo_payload_is_still_refused_whatever_the_status(tmp_path, store):
 # Rollback eligibility: only SMOKE_TESTED may ever be selected
 # --------------------------------------------------------------------------- #
 def test_record_contract_rejects_validated_not_deployed():
-    snapshot_obj = {"meta": {"schema_version": 1}}
+    snapshot_obj = {"meta": {"schema_version": 1,
+                             "generated_at": "2026-08-28T06:00:00+00:00"}}
     metadata = {
         "release_status": SMOKE, "is_demo": False, "artifact_sha256": "b" * 64,
         "deployment_id": "1", "git_commit": "c" * 40, "workflow_run_id": "1",
@@ -382,3 +383,96 @@ def test_cli_publish_spells_out_the_understatement(store, bundle, monkeypatch, c
     assert "WARNING: archived document" in out     # human-readable, for the log
     assert VND in out and SMOKE in out
     assert "create-only" in out
+
+
+# --------------------------------------------------------------------------- #
+# Materializing a resolved record back into a deployable bundle
+#
+# Regression cover for the manifest drift that reached production: the deploy
+# workflow used to hand-build `latest.json` in YAML and set `generated_at` from
+# the ARCHIVE record's `deployed_at`. The bytes and both hashes still matched,
+# so `fwdx validate` passed and the site published a snapshot claiming to be
+# fresher than its data.
+# --------------------------------------------------------------------------- #
+def test_write_last_known_good_round_trips_the_export_bundle(tmp_path, store):
+    """Materializing an archived record reproduces `fwdx export` byte-for-byte."""
+    snap, manifest_path, manifest = _bundle(tmp_path / "src")
+    P.archive(snap, manifest_path, provenance=_prov(SMOKE))
+
+    record = P.retrieve_last_known_good()
+    out = tmp_path / "resolved"
+    written = P.write_last_known_good(record, out)
+
+    assert written == manifest
+    assert (out / manifest["snapshot"]).read_bytes() == Path(snap).read_bytes()
+    assert (out / "latest.json").read_bytes() == Path(manifest_path).read_bytes()
+
+
+def test_write_last_known_good_dates_the_data_not_the_deploy(tmp_path, store):
+    """`generated_at` describes the DATA; `deployed_at` is a different clock."""
+    snap, manifest_path, _ = _bundle(tmp_path / "src", data_as_of="2026-08-27")
+    P.archive(snap, manifest_path,
+              provenance=_prov(SMOKE, deployed_at="2026-08-28T17:15:34.947469+00:00"))
+
+    written = P.write_last_known_good(P.retrieve_last_known_good(), tmp_path / "out")
+
+    assert written["generated_at"] == "2026-08-27T06:00:00+00:00"
+    assert written["generated_at"] != "2026-08-28T17:15:34.947469+00:00"
+    assert written["schema_version"] == 1
+
+
+def test_write_last_known_good_refuses_bytes_that_do_not_match_the_hash(tmp_path, store):
+    snap, manifest_path, _ = _bundle(tmp_path / "src")
+    P.archive(snap, manifest_path, provenance=_prov(SMOKE))
+    record = P.retrieve_last_known_good()
+    record["payload_json"] = record["payload_json"].replace("baseline", "tampered")
+
+    with pytest.raises(P.PublishError, match="archive integrity check failed"):
+        P.write_last_known_good(record, tmp_path / "out")
+
+    assert not (tmp_path / "out").exists()
+
+
+def test_record_contract_requires_meta_generated_at():
+    """A record with no `meta.generated_at` cannot produce a manifest at all.
+
+    Enforced in the contract (not in `write_last_known_good`) so the scan SKIPS
+    such a record and keeps looking, instead of aborting the whole deploy.
+    """
+    metadata = {
+        "release_status": SMOKE, "is_demo": False, "artifact_sha256": "b" * 64,
+        "deployment_id": "1", "git_commit": "c" * 40, "workflow_run_id": "1",
+    }
+    complete = {"meta": {"schema_version": 1, "generated_at": "2026-08-28T06:00:00+00:00"}}
+    assert P._record_passes_contract(metadata, complete) is True
+    assert P._record_passes_contract(metadata, {"meta": {"schema_version": 1}}) is False
+
+
+# --------------------------------------------------------------------------- #
+# `fwdx retrieve-lkg` — the deploy workflow's only entry point into the archive
+# --------------------------------------------------------------------------- #
+def test_cli_retrieve_lkg_writes_a_deployable_bundle(tmp_path, store, capsys):
+    snap, manifest_path, manifest = _bundle(tmp_path / "src")
+    P.archive(snap, manifest_path, provenance=_prov(SMOKE))
+    out = tmp_path / "resolved"
+
+    cli.main(["retrieve-lkg", "--out-dir", str(out)])
+
+    assert (out / manifest["snapshot"]).read_bytes() == Path(snap).read_bytes()
+    assert (out / "latest.json").read_bytes() == Path(manifest_path).read_bytes()
+    assert manifest["artifact_sha256"] in capsys.readouterr().out
+
+
+def test_cli_retrieve_lkg_fails_closed_when_nothing_qualifies(tmp_path, store, bundle,
+                                                              capsys):
+    """Only a VALIDATED_NOT_DEPLOYED record exists: exit 1, write nothing."""
+    snap, manifest_path, _ = bundle
+    P.archive(snap, manifest_path, provenance=_prov(VND))
+    out = tmp_path / "resolved"
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["retrieve-lkg", "--out-dir", str(out)])
+
+    assert exc.value.code == 1
+    assert "never falling back to DEMO data" in capsys.readouterr().err
+    assert not out.exists()

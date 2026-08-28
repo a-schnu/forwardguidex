@@ -238,6 +238,19 @@ def _manifest_errors(payload: dict, raw: bytes, manifest_path: Path | None,
         errs.append("meta.content_hash != recomputed canonical content hash")
     if manifest.get("content_hash") != recomputed:
         errs.append("manifest.content_hash != recomputed canonical content hash")
+    # The manifest is a public claim ABOUT the snapshot, so every field it
+    # restates must actually match the snapshot. Hashes alone were not enough:
+    # a hand-built manifest once shipped `generated_at` copied from the archive
+    # record's `deployed_at` — same bytes, same hashes, wrong timestamp — and
+    # validated clean all the way to production. Anything `build_manifest()`
+    # copies out of `meta` gets cross-checked here.
+    meta = payload.get("meta", {}) or {}
+    for field in ("generated_at", "schema_version"):
+        if manifest.get(field) != meta.get(field):
+            errs.append(
+                f"manifest.{field} {manifest.get(field)!r} != "
+                f"meta.{field} {meta.get(field)!r}"
+            )
     return errs
 
 

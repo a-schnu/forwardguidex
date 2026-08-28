@@ -1,4 +1,5 @@
 """Fail-closed validator: valid demo + every documented failure mode."""
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -84,3 +85,44 @@ def test_negative_price_anomaly():
     p = S.demo_snapshot()
     p["indices"][0]["last"] = -5
     assert any("non-positive" in e or "schema" in e for e in _errs(p))
+
+
+# --------------------------------------------------------------------------- #
+# Manifest cross-checks beyond the hashes.
+#
+# The deploy workflow once hand-built `latest.json` and copied `generated_at`
+# from the archive record's `deployed_at`. Same bytes, same artifact_sha256,
+# same content_hash — so the validator waved it through and production served a
+# manifest that overstated how fresh the data was. These lock that shut.
+# --------------------------------------------------------------------------- #
+def _rewrite_manifest(manifest_path, **overrides):
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(overrides)
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def test_manifest_generated_at_drift_is_rejected(demo_dir):
+    """Exactly the production bug: generated_at replaced by a deploy timestamp."""
+    _rewrite_manifest(demo_dir / "latest.demo.json",
+                      generated_at="2026-08-28T17:15:34.947469+00:00")
+    errs = V.validate_snapshot_file(demo_dir / "snapshot.demo.json", mode="LOCAL_DEMO",
+                                    now=NOW, manifest_path=demo_dir / "latest.demo.json")
+    assert any(e.startswith("manifest.generated_at") for e in errs), errs
+
+
+def test_manifest_schema_version_drift_is_rejected(demo_dir):
+    _rewrite_manifest(demo_dir / "latest.demo.json", schema_version=2)
+    errs = V.validate_snapshot_file(demo_dir / "snapshot.demo.json", mode="LOCAL_DEMO",
+                                    now=NOW, manifest_path=demo_dir / "latest.demo.json")
+    assert any(e.startswith("manifest.schema_version") for e in errs), errs
+
+
+def test_manifest_missing_generated_at_is_rejected(demo_dir):
+    """A manifest that simply omits the field must not pass as 'equal'."""
+    manifest_path = demo_dir / "latest.demo.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["generated_at"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    errs = V.validate_snapshot_file(demo_dir / "snapshot.demo.json", mode="LOCAL_DEMO",
+                                    now=NOW, manifest_path=manifest_path)
+    assert any(e.startswith("manifest.generated_at") for e in errs), errs
