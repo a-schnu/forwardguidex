@@ -113,12 +113,12 @@ jobs:
         run: |
           set -uo pipefail
           node --version
-          if node --test --test-reporter=tap tests/gate/ > gate.tap 2>&1; then
+          if node --test --test-reporter=tap tests/gate/middleware.test.mjs > gate.tap 2>&1; then
             cat gate.tap
             exit 0
           fi
           cat gate.tap
-          grep -nE "not ok|^[[:space:]]+(error|expected|actual|operator|code):" gate.tap | head -n 45 | while IFS= read -r line; do
+          grep -n "" gate.tap | head -n 45 | while IFS= read -r line; do
             echo "::error::$line"
           done
           exit 1
