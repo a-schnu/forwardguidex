@@ -8,7 +8,13 @@ Contract (P0.2 remediation):
   * fetches the LIVE served snapshot bytes and compares SHA-256 against the
     export step's ``artifact_sha256``;
   * verifies /api/chat authentication, method gate, malformed-JSON handling,
-    cross-origin CSRF guard, and ``Cache-Control: no-store``.
+    cross-origin CSRF guard, and ``Cache-Control: no-store``;
+  * every probe against a freshly-deployed URL runs under ONE shared bounded
+    retry (``_retrying``), because Cloudflare's edge propagates per-PoP and a
+    probe that passed says nothing about where the next request will land. A
+    failure whose shape is not propagation (see ``_transient_status`` — e.g. a
+    200 where the gate should have said 401) short-circuits on attempt 1, and
+    an exhausted budget re-raises the original error: no assertion is weakened.
 
 Environment (all required unless noted):
   APP_HOST                      — stable production URL (e.g. https://x.pages.dev)
@@ -37,6 +43,15 @@ UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 TIMEOUT_S = 30
 
+# How long any one probe may keep re-trying a propagation-shaped failure before
+# the build fails with it. ONE budget for every probe, on purpose: the race is
+# the same anycast per-PoP skew everywhere, and per-probe budgets are how the
+# last gap (an unretried probe) went unnoticed. 90 s at 5 s apart = 18 attempts.
+# Measured on run 33180302742: /api/chat was still 404-ing 6.4 s after the
+# warm-up declared routing propagated, and cleared on the first 5 s retry —
+# ~14x headroom. Every leg still fails closed once the budget is spent.
+PROPAGATION_BUDGET_S = 90.0
+
 # Filenames returned by the exporter look like ``snapshot.<hex>.json``.
 _SNAP_NAME_RE = re.compile(r"^snapshot\.[0-9a-f]{64}\.json$")
 
@@ -47,11 +62,86 @@ class SmokeFailure(Exception):
     Using an exception instead of ``sys.exit(::error::...)`` means retried
     probes don't spam the CI log with fake ``::error::`` lines that GitHub
     Actions counts as real errors.
+
+    ``transient`` says whether waiting could plausibly change the verdict. It
+    defaults to True — in the minute after a deploy almost anything the edge
+    tells us may still be propagation noise, and retrying is safe because the
+    budget is bounded and the ORIGINAL failure is re-raised when it runs out.
+    Pass ``transient=False`` for verdicts patience can never change: an open
+    gate, or a credential that simply does not match.
     """
 
+    def __init__(self, msg: str, *, transient: bool = True) -> None:
+        super().__init__(msg)
+        self.transient = transient
 
-def _fail(msg: str) -> "NoReturn":  # type: ignore[valid-type]
-    raise SmokeFailure(msg)
+
+def _fail(msg: str, *, transient: bool = True) -> "NoReturn":  # type: ignore[valid-type]
+    raise SmokeFailure(msg, transient=transient)
+
+
+def _transient_status(status: int | None, *, expected: int) -> bool:
+    """Classify an unexpected HTTP status: propagation noise, or a real verdict?
+
+    Cloudflare's edge routing propagates per-PoP, not atomically. Until it has
+    converged, two back-to-back requests to the SAME URL can land (via anycast)
+    on nodes running different versions of the project — so a route that is
+    definitely deployed can still answer ``404`` for a few seconds. That is
+    noise: it must be retried, not turned into a rollback of a healthy deploy.
+
+    What is NOT noise, ever:
+      * a 2xx/3xx where we asserted a REJECTION — no propagation state serves
+        content the gate should have refused; that is the gate being OPEN, and
+        it must fail the build immediately and permanently;
+      * a ``401`` where we sent the correct password — DASHBOARD_PASSWORD is a
+        project-level binding, identical on every deployment and every PoP, so
+        a mismatch is a config error that waiting cannot fix.
+    """
+    if status is None:
+        # Connection reset / read timeout / TLS hiccup against an edge node
+        # that is mid-deploy. Always worth one more look.
+        return True
+    if 200 <= status < 400:
+        return False
+    if status == 401 and expected == 200:
+        return False
+    # 404 — this PoP has no such deployment yet (the commonest shape by far).
+    # 403 — Cloudflare managed-challenge interstitial in front of the origin.
+    # 408/429 — the edge throttling a burst of probes from one runner IP.
+    # 5xx — includes Cloudflare's 52x family (521 down, 522 timeout, 523
+    #       unreachable, 525/526 TLS, 530) emitted while a deploy is in flight.
+    return status in (403, 404, 408, 429) or 500 <= status <= 599
+
+
+def _retrying(probe, *, label: str, what: str, max_wait_s: float,
+              delay_s: float = 5.0) -> None:
+    """Run ``probe(attempt_label)`` until it passes, until it returns a verdict
+    that patience cannot change, or until the budget runs out.
+
+    THE one retry helper: every probe aimed at a freshly-deployed URL goes
+    through here. ``_wait_until_deployed`` is a warm-up, NOT a barrier — it
+    samples a single anycast path, so a passing sample says nothing about which
+    PoP the *next* request will reach. Only per-probe patience closes that gap.
+
+    Never weakens an assertion. A non-transient failure (see
+    ``_transient_status``) short-circuits on attempt 1, and an exhausted budget
+    re-raises the ORIGINAL ``SmokeFailure`` so ``main`` prints the real reason
+    rather than a vague timeout. Intermediate failures are ``::warning::``
+    only, so GitHub doesn't count retried attempts as errors.
+    """
+    deadline = time.monotonic() + max_wait_s
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            probe(f"{label} attempt {attempt}")
+            return
+        except SmokeFailure as exc:
+            if not exc.transient or time.monotonic() >= deadline:
+                raise
+            print(f"::warning::{label}: {what} not yet stable ({exc}); "
+                  f"retrying in {delay_s:.0f}s...", flush=True)
+            time.sleep(delay_s)
 
 
 def _pass(msg: str) -> None:
@@ -114,6 +204,12 @@ def _wait_until_deployed(host: str, label: str,
     assertions run next and surface the authoritative ``::error::``. This only
     ever adds patience; it never weakens an assertion, so a genuinely broken
     deploy still fails closed.
+
+    NOT A BARRIER. Each phase samples ONE anycast path, so success proves the
+    deployment reached the PoP that answered *that* request and nothing more —
+    the very next request can still land on a lagging node and 404. (Run
+    33180302742: routing "propagated", then /api/chat 404'd 6.4 s later.) Every
+    real probe must therefore carry its own ``_retrying`` budget as well.
     """
     if initial_delay_s > 0:
         time.sleep(initial_delay_s)
@@ -183,11 +279,13 @@ def probe_auth_gate(host: str, pw_correct: str, label: str) -> None:
     if status is None:
         _fail(f"{label}: unauthenticated GET / unreachable ({hdrs.get('__err__')}). Inconclusive -> fail.")
     if status == 200:
-        _fail(f"{label}: SECURITY — unauthenticated GET / returned 200; password gate NOT enforced (dashboard is PUBLIC).")
+        _fail(f"{label}: SECURITY — unauthenticated GET / returned 200; password gate NOT enforced (dashboard is PUBLIC).",
+              transient=False)
     if status == 503:
         _fail(f"{label}: gate Function runs but DASHBOARD_PASSWORD is not set on Cloudflare Pages Production.")
     if status != 401:
-        _fail(f"{label}: unauthenticated GET / expected 401, got {status}. Inconclusive -> fail.")
+        _fail(f"{label}: unauthenticated GET / expected 401, got {status}. Inconclusive -> fail.",
+              transient=_transient_status(status, expected=401))
     if "WWW-Authenticate" not in hdrs and "www-authenticate" not in {k.lower() for k in hdrs}:
         _fail(f"{label}: 401 without WWW-Authenticate challenge header.")
     _pass(f"{label}: unauth GET / -> 401 with challenge.")
@@ -198,7 +296,10 @@ def probe_auth_gate(host: str, pw_correct: str, label: str) -> None:
     if status is None:
         _fail(f"{label}: authenticated GET / unreachable.")
     if status != 200:
-        _fail(f"{label}: authenticated GET / expected 200, got {status}.")
+        # 404 here is the classic static-asset propagation race; 401 is not —
+        # it means the smoke password disagrees with the Pages project's.
+        _fail(f"{label}: authenticated GET / expected 200, got {status}.",
+              transient=_transient_status(status, expected=200))
     _pass(f"{label}: auth GET / -> 200.")
 
     # authenticated (wrong password) — must be 401
@@ -206,8 +307,12 @@ def probe_auth_gate(host: str, pw_correct: str, label: str) -> None:
                             headers={"Authorization": _basic("intentionally-wrong-password")})
     if status is None:
         _fail(f"{label}: wrong-password GET / unreachable.")
+    if status == 200:
+        _fail(f"{label}: SECURITY — GET / with a WRONG password returned 200; the gate accepted invalid credentials.",
+              transient=False)
     if status != 401:
-        _fail(f"{label}: wrong-password GET / expected 401, got {status}.")
+        _fail(f"{label}: wrong-password GET / expected 401, got {status}.",
+              transient=_transient_status(status, expected=401))
     _pass(f"{label}: wrong-pw GET / -> 401.")
 
 
@@ -218,7 +323,8 @@ def probe_live_snapshot(host: str, pw: str, *, expected_sha: str,
     status, _, body = _request(_mark_bust(host + "/data/latest.json", "manifest"),
                                headers=auth)
     if status != 200:
-        _fail(f"{label}: GET /data/latest.json -> {status}.")
+        _fail(f"{label}: GET /data/latest.json -> {status}.",
+              transient=_transient_status(status, expected=200))
     try:
         manifest = json.loads(body)
     except Exception as e:  # noqa: BLE001
@@ -234,7 +340,8 @@ def probe_live_snapshot(host: str, pw: str, *, expected_sha: str,
     status, _, snap_bytes = _request(_mark_bust(host + "/data/" + snap, "bytes"),
                                      headers=auth)
     if status != 200:
-        _fail(f"{label}: GET /data/{snap} -> {status}.")
+        _fail(f"{label}: GET /data/{snap} -> {status}.",
+              transient=_transient_status(status, expected=200))
     digest = hashlib.sha256(snap_bytes).hexdigest()
     if digest != expected_sha:
         _fail(f"{label}: SHA-256({snap}) {digest} != expected {expected_sha}.")
@@ -256,37 +363,14 @@ def probe_live_snapshot(host: str, pw: str, *, expected_sha: str,
     _pass(f"{label}: live snapshot verified (SHA-256, schema, quality={meta.get('quality')}).")
 
 
-def _probe_live_snapshot_retrying(host: str, pw: str, *, expected_sha: str,
-                                  expected_name: str, label: str,
-                                  max_wait_s: float = 90.0) -> None:
-    """Retry ``probe_live_snapshot`` until success or timeout.
-
-    Used for the stable alias where the promotion / cache may lag the unique
-    URL by up to ~1 min. A single-shot check would flag propagation as a
-    smoke failure and rollback needlessly. Intermediate failures are logged
-    as ``::warning::`` (not ``::error::``); the final failure re-raises so
-    ``main`` prints one authoritative ``::error::``.
-    """
-    deadline = time.monotonic() + max_wait_s
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            probe_live_snapshot(host, pw,
-                                expected_sha=expected_sha,
-                                expected_name=expected_name,
-                                label=f"{label} attempt {attempt}")
-            return
-        except SmokeFailure as exc:
-            if time.monotonic() >= deadline:
-                raise
-            print(f"::warning::{label}: probe not yet stable ({exc}); retrying in 5s...",
-                  flush=True)
-            time.sleep(5.0)
-
-
 def probe_chat_api(host: str, pw: str, label: str) -> None:
-    """Contract probes for /api/chat (fails closed on unauth / method / origin / body)."""
+    """Contract probes for /api/chat (fails closed on unauth / method / origin / body).
+
+    Safe to re-run wholesale: none of the four requests ever reaches OpenRouter.
+    Each is rejected earlier — by the auth middleware, the method check, the
+    Origin check, or the JSON parse — before any upstream call, so retries cost
+    nothing and change no state.
+    """
     endpoint = _mark_bust(host + "/api/chat", "chat")
     good = {"Authorization": _basic(pw)}
 
@@ -297,7 +381,10 @@ def probe_chat_api(host: str, pw: str, label: str) -> None:
     if status is None:
         _fail(f"{label}: unauth POST /api/chat unreachable.")
     if status != 401:
-        _fail(f"{label}: unauth POST /api/chat expected 401, got {status}.")
+        # 404 = this PoP hasn't got the Worker bundle yet; 200 = the chat proxy
+        # is answering unauthenticated callers, which is never propagation.
+        _fail(f"{label}: unauth POST /api/chat expected 401, got {status}.",
+              transient=_transient_status(status, expected=401))
     _pass(f"{label}: unauth POST /api/chat -> 401.")
 
     # 2) Authenticated GET -> 405 (method not allowed).
@@ -305,7 +392,8 @@ def probe_chat_api(host: str, pw: str, label: str) -> None:
     if status is None:
         _fail(f"{label}: auth GET /api/chat unreachable.")
     if status != 405:
-        _fail(f"{label}: auth GET /api/chat expected 405, got {status}.")
+        _fail(f"{label}: auth GET /api/chat expected 405, got {status}.",
+              transient=_transient_status(status, expected=405))
     _pass(f"{label}: auth GET /api/chat -> 405.")
 
     # 3) Authenticated malformed JSON -> 400.
@@ -314,8 +402,15 @@ def probe_chat_api(host: str, pw: str, label: str) -> None:
                                body=b"{not-json")
     if status is None:
         _fail(f"{label}: auth malformed POST unreachable.")
+    if status == 503:
+        # chat.js checks env.OPENROUTER_API_KEY *before* parsing the body, so a
+        # 503 here means the route is live but the secret is missing on the
+        # Pages project — name it, because no amount of retrying will fix it.
+        _fail(f"{label}: auth malformed POST expected 400, got 503 — /api/chat is live but "
+              f"OPENROUTER_API_KEY is not set on the Cloudflare Pages project (Production).")
     if status != 400:
-        _fail(f"{label}: auth malformed POST expected 400, got {status}.")
+        _fail(f"{label}: auth malformed POST expected 400, got {status}.",
+              transient=_transient_status(status, expected=400))
     # Response must be uncacheable.
     cc = (hdrs.get("Cache-Control") or hdrs.get("cache-control") or "").lower()
     if "no-store" not in cc:
@@ -331,42 +426,10 @@ def probe_chat_api(host: str, pw: str, label: str) -> None:
     if status is None:
         _fail(f"{label}: foreign-Origin POST unreachable.")
     if status != 403:
-        _fail(f"{label}: foreign-Origin POST expected 403, got {status}.")
+        # A 2xx here would mean the CSRF guard is open — never retried away.
+        _fail(f"{label}: foreign-Origin POST expected 403, got {status}.",
+              transient=_transient_status(status, expected=403))
     _pass(f"{label}: foreign-Origin POST -> 403.")
-
-
-def _probe_chat_api_retrying(host: str, pw: str, label: str,
-                             max_wait_s: float = 60.0) -> None:
-    """Retry ``probe_chat_api`` until success or timeout.
-
-    A passing ``auth GET /api/chat -> 405`` only proves the Worker bundle was
-    live on whatever edge PoP THAT request happened to land on — Cloudflare's
-    edge routing propagates per-PoP, not atomically, so a later request to the
-    SAME URL (e.g. the malformed-body POST a few hundred ms later) can land on
-    a different PoP via anycast and briefly hit the previous Worker version,
-    which has no /api/chat route at all -> 404. This is the same propagation
-    class as the homepage/snapshot races, just surfacing on a route+method our
-    root-path warm-up doesn't cover. None of the four requests in
-    ``probe_chat_api`` ever reach OpenRouter (each is rejected earlier — by the
-    auth middleware, the method check, the JSON parse, or the Origin check —
-    before any upstream call), so retrying the whole probe here is free of
-    cost/side-effect risk. Intermediate failures are logged as ``::warning::``
-    (not ``::error::``); the final failure re-raises so ``main`` prints one
-    authoritative ``::error::``.
-    """
-    deadline = time.monotonic() + max_wait_s
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            probe_chat_api(host, pw, label=f"{label} attempt {attempt}")
-            return
-        except SmokeFailure as exc:
-            if time.monotonic() >= deadline:
-                raise
-            print(f"::warning::{label}: /api/chat probe not yet stable ({exc}); retrying in 5s...",
-                  flush=True)
-            time.sleep(5.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -402,35 +465,43 @@ def _main_body() -> None:
         # assets are live (authenticated GET / -> 200) before asserting, so a
         # propagation race can't masquerade as a smoke failure + rollback.
         _wait_until_deployed(unique, primary_label, pw=pw)
-        probe_auth_gate(unique, pw, primary_label)
-        # Same asset-propagation race applies to the snapshot bytes on a fresh
-        # unique URL, so retry (bounded) rather than single-shot -> rollback.
-        _probe_live_snapshot_retrying(unique, pw,
-                                      expected_sha=expected_sha,
-                                      expected_name=expected_name,
-                                      label=primary_label, max_wait_s=90.0)
-        # Same per-PoP edge-routing propagation race applies to /api/chat
-        # (a passing GET doesn't guarantee a later POST lands on an equally
-        # up-to-date edge node), so retry (bounded) rather than single-shot.
-        _probe_chat_api_retrying(unique, pw, primary_label, max_wait_s=60.0)
+        # EVERY probe below is retried: the warm-up above proves only that ONE
+        # request reached the new deployment, and the auth gate runs at the
+        # moment of maximum PoP skew — earlier, and so more exposed, than the
+        # snapshot and /api/chat probes that already had budgets.
+        _retrying(lambda lbl: probe_auth_gate(unique, pw, lbl),
+                  label=primary_label, what="auth-gate probe",
+                  max_wait_s=PROPAGATION_BUDGET_S)
+        _retrying(lambda lbl: probe_live_snapshot(unique, pw,
+                                                  expected_sha=expected_sha,
+                                                  expected_name=expected_name,
+                                                  label=lbl),
+                  label=primary_label, what="probe",
+                  max_wait_s=PROPAGATION_BUDGET_S)
+        _retrying(lambda lbl: probe_chat_api(unique, pw, lbl),
+                  label=primary_label, what="/api/chat probe",
+                  max_wait_s=PROPAGATION_BUDGET_S)
     else:
         _fail("wrangler-action did not emit deployment-url; cannot verify the unique deploy under test.")
 
     # SECONDARY: stable alias — must reflect the same approved artifact.
     # A persistent mismatch means the promotion silently didn't happen; the
     # brief mandates the workflow must not report full success in that case.
-    # Alias propagation can lag the unique URL by up to a minute; the alias
-    # can also serve a stale artifact briefly, so we retry the SHA / snapshot-
-    # name check for a bounded window before failing.
+    # The alias is answered by the FULL production PoP set — a strictly larger,
+    # slower-converging population than the unique deploy URL — and can serve a
+    # stale artifact briefly, so both of its probes get the same bounded budget.
     if app_host and app_host != unique:
         alias_label = f"alias[{app_host}]"
         _wait_until_deployed(app_host, alias_label, pw=pw, max_wait_s=90.0)
-        probe_auth_gate(app_host, pw, alias_label)
-        _probe_live_snapshot_retrying(
-            app_host, pw,
-            expected_sha=expected_sha, expected_name=expected_name,
-            label=alias_label, max_wait_s=90.0,
-        )
+        _retrying(lambda lbl: probe_auth_gate(app_host, pw, lbl),
+                  label=alias_label, what="auth-gate probe",
+                  max_wait_s=PROPAGATION_BUDGET_S)
+        _retrying(lambda lbl: probe_live_snapshot(app_host, pw,
+                                                  expected_sha=expected_sha,
+                                                  expected_name=expected_name,
+                                                  label=lbl),
+                  label=alias_label, what="probe",
+                  max_wait_s=PROPAGATION_BUDGET_S)
 
     print("SMOKE PASSED (unique deploy: auth gate, live bytes, /api/chat all verified).", flush=True)
 
