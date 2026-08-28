@@ -29,6 +29,13 @@ from . import rights
 
 _log = logging.getLogger(__name__)
 
+# How many headlines the published snapshot carries, and how many warehouse rows
+# we consider when choosing them. The candidate pool has to be much larger than
+# the cap: with GDELT's 3-day window a global "newest N" slice can legitimately
+# be filled by two busy topics.
+NEWS_HEADLINE_CAP = 12
+NEWS_CANDIDATE_ROWS = 300
+
 SCHEMA_VERSION = 1
 CADENCE = "EOD"
 DELIVERY = "STATIC"
@@ -216,6 +223,43 @@ def _sector_order(universe: dict) -> dict[str, dict[str, int]]:
     return out
 
 
+def _select_headlines(candidates: list[dict], *, cap: int) -> list[dict]:
+    """Pick ``cap`` headlines round-robin across topics, newest first within each.
+
+    ``candidates`` must already be filtered and ordered newest-first.
+
+    Selecting by pure global recency (what this did until 2026-08-28) let one
+    busy topic take half the slots while a topic whose GDELT query failed
+    vanished with no trace — and it meant a wider GDELT window could never
+    back-fill a starved topic, because older articles always lose the recency
+    race. Round-robin gives every topic that returned anything at least one slot
+    before any topic takes a second, so coverage is a function of what we
+    collected rather than of which topic happened to be loud.
+
+    The result is re-sorted newest-first for display; fairness governs *which*
+    headlines survive, not the order they are shown in.
+    """
+    by_topic: dict[str, list[dict]] = {}
+    for item in candidates:
+        by_topic.setdefault(item["topic"], []).append(item)
+
+    picked: list[dict] = []
+    while len(picked) < cap:
+        progressed = False
+        for bucket in by_topic.values():
+            if not bucket:
+                continue
+            picked.append(bucket.pop(0))
+            progressed = True
+            if len(picked) >= cap:
+                break
+        if not progressed:
+            break
+
+    picked.sort(key=lambda h: h.get("seendate") or "", reverse=True)
+    return picked
+
+
 def _news_source_health(con) -> dict | None:
     """Fetch the latest ingest health rollup for GDELT (may be None on fresh DB)."""
     try:
@@ -353,11 +397,12 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
     # flagged `macro: true` in the universe (central banks, inflation, jobs, oil,
     # tariffs, markets, semis); geopolitical topics are excluded from the news feed
     # (they still feed the LLM brief). Keep only https links (the dashboard renders
-    # only https and the validator rejects http). Fetch extra, filter, cap at 12.
+    # only https and the validator rejects http). Fetch a wide pool, filter, then
+    # select round-robin across topics (see `_select_headlines`).
     macro_topics = {q.get("key") for q in config.load_universe().get("gdelt_queries", [])
                     if q.get("macro")}
-    news_df = marts.news(con, limit=60)
-    headlines = []
+    news_df = marts.news(con, limit=NEWS_CANDIDATE_ROWS)
+    candidates = []
     for h in news_df.itertuples():
         topic = _str(h.topic)
         if macro_topics and topic not in macro_topics:
@@ -365,12 +410,11 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
         url = _str(h.url)
         if not url or not url.startswith("https://"):
             continue
-        headlines.append({
+        candidates.append({
             "topic": topic, "title": _str(h.title), "domain": _str(h.domain),
             "url": url, "seendate": _str(h.seendate),
         })
-        if len(headlines) >= 12:
-            break
+    headlines = _select_headlines(candidates, cap=NEWS_HEADLINE_CAP)
 
     # brief
     brief = {"markdown": "", "created_at": None}

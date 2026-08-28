@@ -78,6 +78,22 @@ GDELT_TOTAL_BUDGET_SEC = 600.0
 # the pipeline — the outcome is identical and the snapshot is FAILED either way.
 GDELT_CONSECUTIVE_FAILURE_LIMIT = 4
 
+# Query window and page size.
+#
+# `timespan="1d"` made every failed run a permanent hole: GDELT only serves the
+# requested window, so yesterday's headlines cease to exist for us the moment a
+# run fails (unlike prices/rates/earnings, whose providers serve history and can
+# be re-fetched). A 3-day window lets the next successful run pick up the topics
+# it missed — `upsert(keys=["topic", "url"])` already deduplicates, so a wider
+# window costs nothing but response size.
+#
+# `maxrecords` has to grow with it: GDELT sorts DateDesc and truncates, so a 3-day
+# window with the old 50-record page would return the same newest 50 as a 1-day
+# window and back-fill exactly nothing. 150 = 3 x the old page; the documented
+# ceiling is 250.
+GDELT_TIMESPAN = "3d"
+GDELT_MAXRECORDS = 150
+
 # Failure classes that mean "the provider is under pressure" and should widen
 # the spacing for the *next* topic, not just retry the current one.
 _PRESSURE_CLASSES = frozenset({
@@ -167,8 +183,8 @@ def _fetch_query(
     key: str,
     query: str,
     *,
-    maxrecords: int = 50,
-    timespan: str = "1d",
+    maxrecords: int = GDELT_MAXRECORDS,
+    timespan: str = GDELT_TIMESPAN,
     spacing: float = GDELT_MIN_SPACING_SEC,
     max_elapsed: float | None = None,
 ) -> tuple[list[dict], QueryOutcome]:
