@@ -33,9 +33,23 @@ GDELT           ─┘                                                          
 - **Delivery is static-first**: CI builds → validates → uploads → same-origin `fetch`. No Firebase
   SDK or public DB rules ever run in the browser.
 
-Release states: `BUILT → VALIDATED → DEPLOYED → SMOKE_TESTED → ARCHIVED` (deploy ≠ archive; a
-smoke-test failure rolls back code + data together; a shared concurrency lock spans
-select → validate → deploy → smoke → rollback/success).
+Release states: `BUILT → VALIDATED → DEPLOYED → SMOKE_TESTED → ARCHIVED` — or, when the delivery
+rather than the data breaks, `BUILT → VALIDATED → VALIDATED_NOT_DEPLOYED → ARCHIVED`
+(deploy ≠ archive; a smoke-test failure rolls back code + data together; a shared concurrency
+lock spans select → validate → deploy → smoke → rollback/success).
+
+Two — and only two — statuses ever reach the archive, and they are not interchangeable:
+
+- **`SMOKE_TESTED`** — deployed to Cloudflare and verified live by the authenticated smoke test.
+  The **only** status eligible for rollback selection.
+- **`VALIDATED_NOT_DEPLOYED`** — passed `fwdx validate`, but never made it live: the Cloudflare
+  deploy failed, or smoke failed and the deployment was rolled back. Archiving it closes the hole
+  in the history on days when the delivery broke, and it can **never become a rollback target** —
+  the record contract accepts only `SMOKE_TESTED`.
+
+Nothing that failed *validation* is ever archived. Full contract — including why a byte-identical
+same-day re-run can leave `release_status` understated (never overstated) — in the
+[`serve/publish.py`](src/forwardguidex/serve/publish.py) module docstring.
 
 ## Setup
 
