@@ -50,14 +50,20 @@ jobs:
         run: ruff check src tests
 
       - name: Tests
-        # No network: every provider call in the suite is stubbed. A test that
-        # starts reaching a real API should fail here, loudly.
+        # No network: every provider call in the suite is stubbed (and
+        # tests/test_locks.py checks requirements/*.lock against pyproject.toml
+        # offline — regenerating and diffing would make this gate depend on the
+        # live PyPI index, so an unrelated upstream release could fail a PR).
         run: python -m pytest -q
 
-  locks:
-    name: dependency locks are in sync
+  install-locks:
+    name: production locks install cleanly (${{ matrix.lock }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        lock: [core, publish]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,19 +76,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install uv
-        run: pip install "uv==0.12.7"
-
-      - name: Regenerate locks and fail on drift
-        # Guards the P1.2 invariant: a dependency added to pyproject.toml without
-        # re-running scripts/lock-deps.sh would otherwise only explode at the next
-        # production install (--require-hashes rejects unlisted packages).
+      - name: Install from the lock exactly as production does
+        # The `test` job only exercises dev.lock. core.lock and publish.lock are
+        # what daily.yml / deploy-app.yml install, and a broken one there fails
+        # the production run (fail-closed, but the daily refresh is lost). Prove
+        # them here instead, with no secrets and no deploy target.
         run: |
           set -euo pipefail
-          ./scripts/lock-deps.sh
-          if ! git diff --quiet -- requirements/; then
-            echo "::error::requirements/*.lock are stale. Run ./scripts/lock-deps.sh and commit the result."
-            git --no-pager diff --stat -- requirements/
-            exit 1
-          fi
-          echo "Locks in sync."
+          pip install --require-hashes --only-binary=:all: -r requirements/${{ matrix.lock }}.lock
+          pip install --no-deps .
+          pip check
+          fwdx --help > /dev/null
+          python -c "import forwardguidex, forwardguidex.serve.snapshot, forwardguidex.ingest.news"

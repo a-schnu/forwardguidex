@@ -30,7 +30,9 @@ dependencies = [
 publish = ["firebase-admin>=6.5"]
 # Legacy Streamlit dev dashboard (superseded by the static app/ build).
 dashboard = ["streamlit>=1.33", "plotly>=5.20"]
-dev = ["pytest>=8.0", "ruff>=0.4"]
+# `packaging` is used by tests/test_locks.py to check the lockfiles against the
+# specifiers declared above; it is not a runtime dependency.
+dev = ["pytest>=8.0", "ruff>=0.4", "packaging>=24.0"]
 
 [project.scripts]
 fwdx = "forwardguidex.cli:main"
