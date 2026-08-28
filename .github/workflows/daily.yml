@@ -6,6 +6,16 @@ name: forwardguidex-daily
 # smoke test against the UNIQUE deployment URL -> (separate GCP-auth/WIF job)
 # archive to Firestore (create-only) -> release the shared production lock.
 #
+# Archive gate: the archive job is gated on VALIDATE, not on deploy/smoke.
+# A snapshot that validated but never reached production (Cloudflare deploy
+# failed, or smoke failed and we rolled back) is still archived — with
+# release_status=VALIDATED_NOT_DEPLOYED instead of SMOKE_TESTED — so the history
+# has no hole on the days when the delivery, not the data, was broken. Only
+# SMOKE_TESTED records are ever rollback-eligible (serve/publish.py's record
+# contract, and the Firestore query in deploy-app.yml), so this changes nothing
+# about what we are willing to serve. Archiving never rescues a run: if deploy
+# or smoke failed, job 1 still fails and the whole run is still red.
+#
 # Shares a single `production` release lock with deploy-app.yml (see
 # `concurrency` below): the two workflows use the SAME group name, so a
 # code-only deploy and a daily data refresh can never race each other's
@@ -58,6 +68,14 @@ jobs:
       contents: read
     outputs:
       artifact_sha256: ${{ steps.export.outputs.artifact_sha256 }}
+      # 'true' only if `fwdx validate` exited 0. Gates the archive job: nothing
+      # that failed validation may ever be archived. Job outputs are still
+      # published when the job later fails, which is exactly what we need for
+      # the deploy-failed / smoke-failed paths.
+      validated: ${{ steps.validate.outputs.validated }}
+      # 'success' | 'failure' | '' (empty when the smoke step never ran because
+      # the deploy step failed first). Picks the release_status below.
+      smoke_outcome: ${{ steps.smoke.outcome }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -108,9 +126,35 @@ jobs:
           echo "ARTIFACT_SHA256=$ARTIFACT_SHA256" >> "$GITHUB_ENV"
 
       - name: Validate the candidate snapshot (fail-closed)
+        id: validate
         run: |
           set -euo pipefail
           fwdx validate "${{ steps.export.outputs.snapshot_path }}"
+          # `set -e` means this line is only reached when validate exited 0.
+          echo "validated=true" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------
+      # Upload the validated bundle NOW, before anything can go wrong in the
+      # deploy leg. Previously this ran only after a green smoke test, so a
+      # Cloudflare failure meant the artifact never existed and the archive
+      # job had nothing to download — the day disappeared from the history
+      # even though the data itself was fine.
+      #
+      # This is the ONLY upload of `validated-snapshot` in this workflow: a
+      # second upload under the same name errors out ("an artifact with this
+      # name already exists"), so do not re-add one on the smoke-success path.
+      # Name and retention are unchanged, so the archive job's download and
+      # its 7-day contract keep working exactly as before.
+      # -----------------------------------------------------------------
+      - name: Upload validated snapshot for the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: validated-snapshot
+          path: |
+            dist/snapshot.*.json
+            dist/latest.json
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Stage validated snapshot into app/data/ (prod files alongside demo files)
         run: |
@@ -238,11 +282,13 @@ jobs:
           if-no-files-found: warn
 
       # --- Rollback path (smoke failed) ---------------------------------
-      # NOTE: if smoke fails and we roll back, the `publish` job below is
-      # skipped entirely (it `needs: build-validate-deploy`, which will be
-      # in a failed state) — the just-generated snapshot is never archived,
-      # matching "deploy != archive" and "archive-fail/skip is not a
-      # rollback trigger, but a failed deploy must never be archived".
+      # NOTE: if smoke fails we roll back, and this job then fails on purpose
+      # (the alert step below). The `publish` job still runs — it is gated on
+      # `validated`, not on this job's conclusion — but it archives the
+      # snapshot as VALIDATED_NOT_DEPLOYED, never SMOKE_TESTED. So the rolled
+      # back artifact is recorded as history and is NOT eligible to be rolled
+      # back onto later: "deploy != archive", and nothing that failed the smoke
+      # gate is ever presented as known-good.
       - name: Rollback to previous successful deployment (smoke failed)
         if: always() && steps.smoke.outcome == 'failure'
         env:
@@ -318,35 +364,40 @@ jobs:
       - name: Alert — smoke test failed, rollback performed
         if: always() && steps.smoke.outcome == 'failure'
         run: |
-          echo "::error::Daily deploy smoke test FAILED for ${APP_HOST}. Rolled back to the previous successful Cloudflare Pages deployment (id: ${{ steps.pre.outputs.deployment_id }}). The freshly built snapshot was NOT archived to Firestore (publish job is skipped when this job fails). See the smoke-test-log-${{ github.run_id }}-${{ github.run_attempt }} artifact for details. This job is intentionally failing so GitHub surfaces a run failure as the alert; wire a dedicated channel (Slack/email/PagerDuty webhook) here if stronger paging is needed."
+          echo "::error::Daily deploy smoke test FAILED for ${APP_HOST}. Rolled back to the previous successful Cloudflare Pages deployment (id: ${{ steps.pre.outputs.deployment_id }}). The freshly built snapshot IS archived to Firestore, but as release_status=VALIDATED_NOT_DEPLOYED — it is history only and can never be selected as a rollback target. See the smoke-test-log-${{ github.run_id }}-${{ github.run_attempt }} artifact for details. This job is intentionally failing so GitHub surfaces a run failure as the alert; wire a dedicated channel (Slack/email/PagerDuty webhook) here if stronger paging is needed."
           exit 1
 
-      - name: Upload validated snapshot for the publish job
-        if: steps.smoke.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: validated-snapshot
-          path: |
-            dist/snapshot.*.json
-            dist/latest.json
-          retention-days: 7
-          if-no-files-found: error
-
   # ---------------------------------------------------------------------
-  # Job 2 — archive the deployed, smoke-tested snapshot to Firestore
-  # (create-only, idempotent) via a separate GCP-auth (WIF) job. Only runs
-  # if build-validate-deploy succeeded (i.e. smoke passed) — a rolled-back
-  # deploy is never archived.
+  # Job 2 — archive the validated snapshot to Firestore (create-only,
+  # idempotent) via a separate GCP-auth (WIF) job.
+  #
+  # Gated on VALIDATION, not on the deploy leg: `if:` requires
+  # needs.build-validate-deploy.outputs.validated == 'true', which is only
+  # ever set after `fwdx validate` exits 0. So:
+  #   * validate failed (or never ran)  -> this job is SKIPPED, nothing archived.
+  #   * validate ok, deploy+smoke ok    -> archived as SMOKE_TESTED.
+  #   * validate ok, deploy or smoke KO -> archived as VALIDATED_NOT_DEPLOYED.
+  #
+  # `!cancelled()` rather than `always()`: a cancelled run should not archive.
+  # This job running does NOT make the run green — job 1 has already failed in
+  # the last case and the run stays red; a successful archive of a
+  # VALIDATED_NOT_DEPLOYED record is not a substitute for fixing the deploy.
   # ---------------------------------------------------------------------
   publish:
-    name: Archive smoke-tested snapshot to Firestore (WIF, create-only)
+    name: Archive validated snapshot to Firestore (WIF, create-only)
     needs: build-validate-deploy
+    if: ${{ !cancelled() && needs.build-validate-deploy.outputs.validated == 'true' }}
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 15
     permissions:
       contents: read
       id-token: write # ONLY this job needs id-token:write, for WIF -> GCP.
+    env:
+      # SMOKE_TESTED only when the smoke step actually reported success. Any
+      # other outcome — 'failure', or '' because the deploy step died before
+      # smoke ran — means these bytes were never proven live.
+      FGX_RELEASE_STATUS: ${{ needs.build-validate-deploy.outputs.smoke_outcome == 'success' && 'SMOKE_TESTED' || 'VALIDATED_NOT_DEPLOYED' }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -390,5 +441,15 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # Belt-and-suspenders: the job-level expression above can only produce
+          # one of these two, but the value ends up in a permanent, create-only
+          # record — so refuse anything else before authenticating further.
+          # `fwdx publish` validates it again against publish.RELEASE_STATUSES.
+          case "${FGX_RELEASE_STATUS}" in
+            SMOKE_TESTED|VALIDATED_NOT_DEPLOYED) ;;
+            *) echo "::error::Refusing to archive with release_status='${FGX_RELEASE_STATUS}'." ; exit 1 ;;
+          esac
+          echo "Archiving snapshot with release_status=${FGX_RELEASE_STATUS}"
           SNAP=$(ls dist/snapshot.*.json | head -n1)
-          fwdx publish "$SNAP" --manifest dist/latest.json
+          fwdx publish "$SNAP" --manifest dist/latest.json \
+            --release-status "${FGX_RELEASE_STATUS}"

@@ -134,6 +134,21 @@ def cmd_validate(args) -> None:
     print(f"VALID: {args.path}")
 
 
+def _release_status(value: str) -> str:
+    """argparse ``type`` for ``--release-status``.
+
+    Also guards the *default*: argparse runs ``type`` over a string default that
+    was not overridden on the command line, so a bogus ``FGX_RELEASE_STATUS``
+    fails the parse instead of being written to a permanent, create-only record.
+    """
+    from .serve.publish import validate_release_status
+
+    try:
+        return validate_release_status(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def cmd_publish(args) -> None:
     from pathlib import Path
 
@@ -143,15 +158,32 @@ def cmd_publish(args) -> None:
     if manifest is None:
         sibling = Path(args.path).parent / "latest.json"
         manifest = str(sibling) if sibling.exists() else None
+    # Re-validate: `cmd_publish` is also reachable without going through the
+    # argparse `type` hook, and an unknown status must never reach Firestore.
+    release_status = publish.validate_release_status(args.release_status)
     provenance = {
         "deployment_id": os.getenv("FGX_DEPLOYMENT_ID") or os.getenv("GITHUB_RUN_ID", "local"),
         "workflow_run_id": os.getenv("GITHUB_RUN_ID", "local"),
         "git_commit": os.getenv("GITHUB_SHA", "local"),
-        "release_status": args.release_status,
+        "release_status": release_status,
         "deployed_at": datetime.now(timezone.utc).isoformat(),
     }
+    print(f"Archiving with release_status={release_status}")
     result = publish.archive(args.path, manifest_path=manifest, provenance=provenance)
     print(f"Archived: {result}")
+    if result.status_mismatch:
+        # publish.archive() already emitted the machine-readable ::warning::;
+        # spell it out here so a human reading the CLI output cannot miss that
+        # the archive does NOT say what this run asked it to say.
+        adjective = "UNDERSTATES" if result.status_understated else "diverges from"
+        print(
+            f"WARNING: archived document {result.doc_id} already existed and "
+            f"keeps release_status={result.stored_release_status!r}; this run "
+            f"requested {result.requested_release_status!r}. The stored record "
+            f"{adjective} this run. The writer identity is create-only, so the "
+            f"value was NOT and CANNOT be updated (no corrective write is "
+            f"attempted, by design)."
+        )
 
 
 def cmd_decommission_fred(args) -> None:
@@ -234,7 +266,14 @@ def main(argv=None) -> None:
     pp = sub.add_parser("publish", help="archive snapshot to Firestore (create-only)")
     pp.add_argument("path")
     pp.add_argument("--manifest", default=None)
-    pp.add_argument("--release-status", default="SMOKE_TESTED")
+    # The workflow supplies this: SMOKE_TESTED when the deployment was verified
+    # live, VALIDATED_NOT_DEPLOYED when the snapshot validated but deploy/smoke
+    # failed. Flag wins over env; both are checked against the allowed set (an
+    # unknown value would become an uncorrectable permanent record).
+    pp.add_argument("--release-status", type=_release_status,
+                    default=os.getenv("FGX_RELEASE_STATUS", "SMOKE_TESTED"),
+                    help="SMOKE_TESTED (default, also via $FGX_RELEASE_STATUS) "
+                         "or VALIDATED_NOT_DEPLOYED")
     pp.set_defaults(func=cmd_publish)
 
     pd = sub.add_parser("decommission-fred", help="one-time FRED cleanup (idempotent)")
