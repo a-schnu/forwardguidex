@@ -52,22 +52,32 @@ jobs:
   #
   # Source order per the plan is "Firestore archive -> GH artifact ->
   # currently-deployed". This job implements the primary source (Firestore
-  # archive) directly against the Firestore REST API using a read-only WIF
-  # identity (WIF_READER_SA) — no service-account key file, no firebase-admin
-  # dependency needed here (that library is reserved for serve/publish.py's
-  # writer path). The GH-artifact and currently-deployed fallbacks are NOT
-  # implemented in this pass: if the Firestore query comes back empty or
-  # fails, this job fails closed rather than guessing ("fail (never DEMO) if
-  # none" per R4-5.b). A follow-up could add those fallbacks (e.g. a
-  # `fwdx fetch-last-known-good` CLI command) for full parity with the plan;
-  # documenting that gap here rather than silently reimplementing pipeline
-  # logic that belongs to the Python package.
+  # archive) by calling `fwdx retrieve-lkg`, a thin wrapper over the
+  # unit-tested `publish.retrieve_last_known_good()` + `write_last_known_good()`.
+  #
+  # It used to paraphrase that logic as an inline Firestore REST query, and the
+  # paraphrase drifted: the hand-built manifest set `generated_at` from the
+  # archive record's `deployed_at`, so every code-only deploy published a
+  # snapshot claiming to be fresher than its data. The hashes still matched, so
+  # `fwdx validate` passed it. One implementation, one contract — and the
+  # validator now cross-checks `manifest.generated_at` against `meta` as well.
+  #
+  # The Python resolver also scans up to `publish._RETRIEVE_SCAN_LIMIT` records
+  # in deployed_at-descending order and applies the full record contract
+  # (SMOKE_TESTED + is_demo=false + hex64 artifact + schema_version 1 +
+  # complete provenance), where the REST query took `limit: 1` and trusted it —
+  # so a single malformed record at the head of the archive no longer blocks
+  # every code deploy. It orders on one field, so it needs no composite index.
+  #
+  # The GH-artifact and currently-deployed fallbacks are still NOT implemented:
+  # if the archive yields nothing, this job fails closed rather than guessing
+  # ("fail (never DEMO) if none" per R4-5.b).
   # ---------------------------------------------------------------------
   resolve-last-known-good:
     name: Resolve last-known-good snapshot (Firestore archive, read-only WIF)
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write # ONLY this job needs id-token:write, for WIF -> GCP.
@@ -79,139 +89,50 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install forwardguidex (core + publish extra, hash-pinned)
+        # `publish.lock`, not `core.lock`: the reader path goes through
+        # firebase-admin, exactly like daily.yml's publish job. Same
+        # hash-pinned, wheel-only install contract — see that job for why.
+        run: |
+          set -euo pipefail
+          pip install --require-hashes --only-binary=:all: -r requirements/publish.lock
+          pip install --no-deps -e .
+          pip check
+
       - name: Authenticate to GCP (WIF, reader service account)
         id: auth
+        # No `token_format`/`access_token_scopes`: firebase-admin reads the
+        # Workload Identity Federation credential file this action writes (still
+        # keyless — never a service-account key) as ADC. The *read-only*
+        # guarantee comes from IAM — WIF_READER_SA should be bound to
+        # roles/datastore.viewer only, see the deploy runbook — never from a
+        # scope string.
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_READER_SA }}
-          token_format: access_token
-          # Firestore/Datastore's OAuth scope; the *read-only* guarantee comes
-          # from IAM (WIF_READER_SA should be bound to roles/datastore.viewer
-          # only — see the deploy runbook), not from the scope string itself.
-          access_token_scopes: https://www.googleapis.com/auth/datastore
 
-      - name: Query Firestore archive for the newest SMOKE_TESTED, non-demo snapshot
+      - name: Resolve the newest SMOKE_TESTED, non-demo snapshot from the archive
         id: resolve
         env:
-          FIRESTORE_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
-          GCP_PROJECT_ID: ${{ vars.GOOGLE_CLOUD_PROJECT }}
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
         run: |
           set -euo pipefail
-          mkdir -p resolved
-          python3 - <<-'PYEOF'
-          	# Resolve the deterministic last-known-good record (R4-5.b):
-          	#   accept only release_status == SMOKE_TESTED AND is_demo == false,
-          	#   select by descending metadata.deployed_at.
-          	# This assumes the archive document shape from R4-5.e:
-          	#   { metadata: { artifact_sha256, content_hash, deployed_at,
-          	#                 deployment_id, workflow_run_id, git_commit,
-          	#                 release_status, is_demo },
-          	#     payload_json: "<canonical string>" }
-          	# and that payload_json's raw UTF-8 bytes ARE the exact final
-          	# snapshot file bytes (so its SHA-256 equals artifact_sha256) —
-          	# per the plan, content_hash is computed over the canonical
-          	# payload and then re-inserted before the final bytes are
-          	# serialized, and payload_json is that same canonical string.
-          	# If serve/publish.py stores something different, this step and
-          	# firestore.indexes.json's composite index must be updated together.
-          	import base64
-          	import hashlib
-          	import json
-          	import os
-          	import sys
-          	import urllib.error
-          	import urllib.request
-
-          	project = os.environ["GCP_PROJECT_ID"]
-          	token = os.environ["FIRESTORE_ACCESS_TOKEN"]
-          	if not project:
-          	    sys.exit("::error::GOOGLE_CLOUD_PROJECT is not set (repo/environment variable). Cannot resolve last-known-good.")
-
-          	url = f"https://firestore.googleapis.com/v1/projects/{project}/databases/(default)/documents:runQuery"
-          	query = {
-          	    "structuredQuery": {
-          	        "from": [{"collectionId": "snapshots_history"}],
-          	        "where": {
-          	            "compositeFilter": {
-          	                "op": "AND",
-          	                "filters": [
-          	                    {"fieldFilter": {"field": {"fieldPath": "metadata.is_demo"}, "op": "EQUAL", "value": {"booleanValue": False}}},
-          	                    {"fieldFilter": {"field": {"fieldPath": "metadata.release_status"}, "op": "EQUAL", "value": {"stringValue": "SMOKE_TESTED"}}},
-          	                ],
-          	            }
-          	        },
-          	        "orderBy": [{"field": {"fieldPath": "metadata.deployed_at"}, "direction": "DESCENDING"}],
-          	        "limit": 1,
-          	    }
-          	}
-          	req = urllib.request.Request(
-          	    url,
-          	    data=json.dumps(query).encode("utf-8"),
-          	    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-          	    method="POST",
-          	)
-          	try:
-          	    with urllib.request.urlopen(req, timeout=30) as resp:
-          	        rows = json.load(resp)
-          	except urllib.error.HTTPError as e:
-          	    sys.exit(f"::error::Firestore runQuery failed: HTTP {e.code} {e.read().decode('utf-8', 'replace')[:500]}")
-          	except urllib.error.URLError as e:
-          	    sys.exit(f"::error::Firestore runQuery failed: {e}")
-
-          	rows = [r for r in rows if isinstance(r, dict) and "document" in r]
-          	if not rows:
-          	    sys.exit("::error::No SMOKE_TESTED, non-demo snapshot found in the Firestore archive. Refusing to deploy — never falling back to DEMO data (R4-5.b).")
-
-          	fields = rows[0]["document"]["fields"]
-          	metadata = fields["metadata"]["mapValue"]["fields"]
-
-          	def dv_str(v):
-          	    return v.get("stringValue") or v.get("timestampValue")
-
-          	artifact_sha256 = metadata["artifact_sha256"]["stringValue"]
-          	content_hash = metadata["content_hash"]["stringValue"]
-          	is_demo = metadata["is_demo"]["booleanValue"]
-          	release_status = metadata["release_status"]["stringValue"]
-          	deployed_at = dv_str(metadata["deployed_at"])
-          	payload_json = fields["payload_json"]["stringValue"]
-
-          	# Belt-and-suspenders: re-check in code even though the query already filtered.
-          	if is_demo:
-          	    sys.exit("::error::Resolved archive record has metadata.is_demo == true; refusing.")
-          	if release_status != "SMOKE_TESTED":
-          	    sys.exit(f"::error::Resolved archive record has release_status={release_status!r}, not SMOKE_TESTED; refusing.")
-
-          	payload_bytes = payload_json.encode("utf-8")
-          	computed_sha256 = hashlib.sha256(payload_bytes).hexdigest()
-          	if computed_sha256 != artifact_sha256:
-          	    sys.exit(
-          	        f"::error::Archive integrity check failed: SHA-256(payload_json)={computed_sha256} "
-          	        f"!= recorded metadata.artifact_sha256={artifact_sha256}."
-          	    )
-
-          	snapshot_name = f"snapshot.{artifact_sha256}.json"
-          	with open(f"resolved/{snapshot_name}", "wb") as f:
-          	    f.write(payload_bytes)
-
-          	manifest = {
-          	    "snapshot": snapshot_name,
-          	    "artifact_sha256": artifact_sha256,
-          	    "content_hash": content_hash,
-          	    "generated_at": deployed_at,
-          	    "schema_version": 1,
-          	}
-          	with open("resolved/latest.json", "w", encoding="utf-8") as f:
-          	    json.dump(manifest, f, indent=2)
-          	    f.write("\n")
-
-          	print(f"Resolved last-known-good snapshot {snapshot_name} (deployed_at={deployed_at}, is_demo={is_demo}).")
-
-          	gh_output = os.environ.get("GITHUB_OUTPUT")
-          	if gh_output:
-          	    with open(gh_output, "a", encoding="utf-8") as f:
-          	        f.write(f"artifact_sha256={artifact_sha256}\n")
-          	PYEOF
+          if [ -z "${GOOGLE_CLOUD_PROJECT:-}" ]; then
+            echo "::error::GOOGLE_CLOUD_PROJECT is not set (repo/environment variable). Cannot resolve last-known-good."
+            exit 1
+          fi
+          # Exits 1 when no archived record satisfies the contract. It verifies
+          # sha256(payload_json) == metadata.artifact_sha256 before writing, so
+          # `resolved/` is either a coherent bundle or absent.
+          fwdx retrieve-lkg --out-dir resolved
+          SHA=$(python3 -c "import json; print(json.load(open('resolved/latest.json'))['artifact_sha256'])")
+          echo "artifact_sha256=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Upload resolved snapshot for the deploy job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

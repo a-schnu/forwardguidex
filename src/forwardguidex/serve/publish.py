@@ -25,8 +25,10 @@ interchangeable:
 ``SMOKE_TESTED``
     The artifact was deployed to Cloudflare and verified live by the
     authenticated smoke test. **The only status eligible for rollback
-    selection** (`_record_passes_contract` / `retrieve_last_known_good`, and the
-    mirrored Firestore query in ``.github/workflows/deploy-app.yml``).
+    selection** (`_record_passes_contract` / `retrieve_last_known_good`).
+    ``.github/workflows/deploy-app.yml`` used to mirror this query in YAML;
+    it now shells out to `fwdx retrieve-lkg` so there is exactly one
+    implementation of the contract to keep correct.
 
 ``VALIDATED_NOT_DEPLOYED``
     The artifact passed `fwdx validate` (fail-closed) but never made it live:
@@ -420,6 +422,12 @@ def _record_passes_contract(metadata: dict, snapshot_obj: dict) -> bool:
     meta = (snapshot_obj or {}).get("meta", {}) or {}
     if meta.get("schema_version") != SUPPORTED_SCHEMA_VERSION:
         return False
+    # `meta.generated_at` is `required` by snapshot_schema.json, so any record
+    # missing it was never a valid snapshot. It is checked here rather than in
+    # `write_last_known_good` so a malformed record is SKIPPED by the scan
+    # instead of aborting it: the manifest cannot be built without this field.
+    if not meta.get("generated_at"):
+        return False
     for key in ("deployment_id", "git_commit", "workflow_run_id"):
         if not metadata.get(key):
             return False
@@ -593,3 +601,58 @@ def retrieve_last_known_good(*, project: str | None = None,
                 "snapshot": snapshot_obj,
             }
     return None
+
+
+def write_last_known_good(record: dict, out_dir) -> dict:
+    """Materialize a :func:`retrieve_last_known_good` record as a deploy bundle.
+
+    Writes ``snapshot.<artifact_sha256>.json`` + ``latest.json`` into `out_dir`
+    and returns the manifest.
+
+    Two invariants this function exists to hold:
+
+    * **The snapshot bytes are copied verbatim, never re-serialized.**
+      ``payload_json`` already *is* the deployed artifact text, so round-tripping
+      it through ``json.dumps`` would risk a different — still canonical, but not
+      byte-*identical* — encoding, and the browser verifies ``artifact_sha256``
+      over the exact bytes it receives.
+    * **The manifest is derived from the payload, not from the archive metadata.**
+      ``manifest.generated_at`` describes when the DATA was generated;
+      ``metadata.deployed_at`` is a different clock. Building it via the one
+      canonical writer, :func:`forwardguidex.serve.snapshot.build_manifest`,
+      is what keeps this path and `fwdx export` producing the same manifest for
+      the same bytes.
+    """
+    from . import snapshot as snap
+
+    metadata = record["metadata"]
+    payload_bytes = record["payload_json"].encode("utf-8")
+    snapshot_obj = record["snapshot"]
+
+    artifact = metadata.get("artifact_sha256")
+    computed = hashlib.sha256(payload_bytes).hexdigest()
+    if computed != artifact:
+        raise PublishError(
+            f"archive integrity check failed: sha256(payload_json)={computed} != "
+            f"recorded metadata.artifact_sha256={artifact}."
+        )
+
+    meta = snapshot_obj.get("meta", {}) or {}
+    if meta.get("is_demo") is not False:
+        raise PublishError(
+            f"refusing to materialize a record with meta.is_demo={meta.get('is_demo')!r}."
+        )
+
+    # `meta.content_hash` and the archived `metadata.content_hash` are the same
+    # value (both come from `snapshot.finalize`); prefer the payload's own copy
+    # so the manifest is self-consistent with the bytes written next to it.
+    content_hash = meta.get("content_hash") or metadata.get("content_hash") or ""
+    manifest = snap.build_manifest(snapshot_obj, artifact, content_hash)
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / manifest["snapshot"]).write_bytes(payload_bytes)
+    (out / "latest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return manifest
