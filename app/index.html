@@ -3,18 +3,16 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ForwardGuidex — EOD Market Dashboard</title>
+<meta name="color-scheme" content="dark" />
+<title>ForwardGuidex</title>
 <link rel="stylesheet" href="css/base.css" />
 </head>
 <body>
+<a class="skip" href="#mercati">Vai ai contenuti</a>
 
-<div class="blobs" aria-hidden="true"><div class="blob b1"></div><div class="blob b2"></div></div>
-
-<div class="demo-ribbon" id="demoRibbon" hidden>DEMO</div>
-
-<header>
-  <div class="wrap"><div class="nav glass">
-    <div class="brand">
+<header class="top">
+  <div class="top-row wrap">
+    <a class="brand" href="#mercati" aria-label="ForwardGuidex">
       <svg class="brand-mark" viewBox="0 0 140 84" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
         <defs>
           <linearGradient id="fgxHeadTop" x1="70" y1="8" x2="120" y2="40" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#8fddff"/><stop offset=".5" stop-color="#26a9ff"/><stop offset="1" stop-color="#1f7cf0"/></linearGradient>
@@ -29,127 +27,149 @@
         <path d="M67 50 Q50 58 33 71 Q51 62 62 54 Z" fill="url(#fgxFade)" opacity=".6"/>
       </svg>
       <span class="brand-name">ForwardGuidex</span>
-    </div>
+    </a>
+    <nav class="nav" id="nav" aria-label="Sezioni">
+      <a href="#mercati" class="on">Mercati</a>
+      <a href="#movimenti">Movimenti</a>
+      <a href="#settori">Settori</a>
+      <a href="#tassi">Tassi</a>
+      <a href="#agenda">Agenda</a>
+      <a href="#notizie">Notizie</a>
+    </nav>
     <span class="spacer"></span>
-    <span class="asof muted">Dati al <span id="dataAsOf">—</span></span>
-  </div></div>
+    <button class="search" id="searchBtn" type="button" aria-haspopup="dialog" aria-controls="palette">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.5 15.5 L20 20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span class="search-l">Cerca</span>
+      <kbd>/</kbd>
+    </button>
+    <div class="status">
+      <span class="demo-tag" id="demoTag" hidden>DEMO</span>
+      <span class="mkt" id="mktState"><span class="mkt-dot" aria-hidden="true"></span><span id="mktLabel">—</span></span>
+      <span class="asof"><span class="q-dot" id="quality" role="img" aria-label="Stato dei dati"></span><span id="asOf">—</span></span>
+    </div>
+  </div>
+  <div class="tape" id="tape" role="region" aria-label="Quotazioni in sintesi"><div class="tape-track" id="tapeTrack"></div></div>
 </header>
 
 <main id="dashboard">
 
-  <section class="block first" id="overview">
+  <section class="sec" id="mercati" aria-labelledby="h-mercati">
     <div class="wrap">
-      <div class="ov-top">
-        <div class="head reveal">
-          <div class="eyebrow">Overview</div>
-          <h2>Mercati in sintesi</h2>
-          <p>Lo stato dei principali mercati globali: indici, futures, ETF e criptovalute.</p>
+      <div class="brief" id="brief" hidden>
+        <div class="brief-meta">
+          <span class="lbl">Morning Brief</span>
+          <span class="tag tag-ai" title="Testo generato automaticamente da un modello linguistico a partire dai dati di questa pagina">AI</span>
+          <span class="muted" id="briefWhen"></span>
+          <span class="spacer"></span>
+          <button class="link-btn" id="briefOpen" type="button">Leggi il brief completo <span aria-hidden="true">→</span></button>
         </div>
-        <div class="brief-card glass reveal" id="briefCard">
-          <button class="brief-toggle" id="briefToggle" type="button" aria-expanded="false" aria-controls="briefBody">
-            <span class="brief-toggle-l">
-              <span class="eyebrow">Morning Brief</span>
-              <span class="when muted" id="briefWhen"></span>
-            </span>
-            <span class="brief-caret" aria-hidden="true">▾</span>
-          </button>
-          <div class="brief-body" id="briefBody"></div>
-        </div>
+        <p class="brief-lead" id="briefLead"></p>
+        <ul class="brief-points prose" id="briefPoints"></ul>
       </div>
-      <div class="ov-tabs reveal">
-        <div class="tablist" role="tablist" aria-label="Classi di attività" id="ovTablist"></div>
-        <p class="tab-desc muted" id="ovTabDesc"></p>
-        <div class="ov-panels" id="ovPanels"></div>
+
+      <div class="sec-head">
+        <h2 id="h-mercati">Mercati</h2>
+        <div class="tabs" role="tablist" aria-label="Classi di attività" id="ovTabs"></div>
+        <span class="spacer"></span>
+        <div class="tools" id="mktTools"></div>
       </div>
+      <div id="ovPanels"></div>
     </div>
   </section>
 
-  <section class="block" id="movers">
+  <section class="sec" id="movimenti" aria-labelledby="h-movimenti">
     <div class="wrap">
-      <div class="head reveal">
-        <div class="eyebrow">Movimenti</div>
-        <h2>Chi sale, chi scende</h2>
-        <p>I titoli che salgono e scendono di più nella giornata.</p>
+      <div class="sec-head">
+        <h2 id="h-movimenti">Movimenti</h2>
+        <span class="sec-meta">i titoli in copertura che si sono mossi di più oggi</span>
       </div>
-      <div class="movers reveal">
-        <div class="mv-col glass">
-          <h4 class="mv-h up">Gainers</h4>
-          <div id="moversGainers"></div>
+      <div class="two">
+        <div class="card">
+          <h3 class="card-h up">In rialzo</h3>
+          <div class="mlist" id="moversUp"></div>
         </div>
-        <div class="mv-col glass">
-          <h4 class="mv-h down">Losers</h4>
-          <div id="moversLosers"></div>
+        <div class="card">
+          <h3 class="card-h down">In ribasso</h3>
+          <div class="mlist" id="moversDown"></div>
         </div>
       </div>
     </div>
   </section>
 
-  <section class="block" id="settori">
+  <section class="sec" id="settori" aria-labelledby="h-settori">
     <div class="wrap">
-      <div class="head reveal">
-        <div class="eyebrow">Overview settoriale</div>
-        <h2>Esplora nel dettaglio</h2>
-        <p>Performance per settore; tocca una card per il dettaglio completo.</p>
+      <div class="sec-head">
+        <h2 id="h-settori">Settori</h2>
+        <span class="sec-meta" id="breadth"></span>
+        <span class="spacer"></span>
+        <div class="tools" id="secTools"></div>
       </div>
-      <div class="sector-bars reveal" id="sectorBars" hidden></div>
-    </div>
-    <div class="wrap">
-      <div class="track" id="track"></div>
-      <div class="dots" id="dots"></div>
+      <div class="heatmap" id="heatmap"></div>
     </div>
   </section>
 
-  <section class="block" id="tassi">
+  <section class="sec" id="tassi" aria-labelledby="h-tassi">
     <div class="wrap">
-      <div class="head reveal">
-        <div class="eyebrow">Tassi</div>
-        <h2>Curva Treasury &amp; tassi di riferimento</h2>
-        <p>Curva dei rendimenti dei Treasury USA e le ultime decisioni delle principali banche centrali.</p>
+      <div class="sec-head">
+        <h2 id="h-tassi">Tassi</h2>
+        <span class="sec-meta" id="curveShape"></span>
       </div>
-      <div class="yc-wrap glass reveal" id="yieldCurveWrap" data-viz hidden>
-        <div class="yc-head">
-          <div class="yc-title">Curva dei rendimenti UST</div>
-          <div class="yc-sub muted">Rendimenti par dei Treasury per scadenza</div>
+      <div class="rates-grid">
+        <div class="card" id="curvePanel">
+          <div class="card-bar">
+            <h3 class="card-h">Curva Treasury USA</h3>
+            <span class="spacer"></span>
+            <div class="tools" id="curveTools"></div>
+          </div>
+          <div id="curve"></div>
+          <div class="spreads" id="spreads"></div>
         </div>
-        <div class="yc-chart">
-          <div id="yieldCurve"></div>
-          <div class="yc-tip" id="ycTip" role="status" aria-live="polite"></div>
+        <div class="stack">
+          <div class="card">
+            <h3 class="card-h">Treasury e mercato monetario</h3>
+            <div class="rtable" id="ratesTable"></div>
+          </div>
+          <div class="card" id="cbPanel">
+            <h3 class="card-h">Banche centrali</h3>
+            <div class="rtable" id="cbList"></div>
+          </div>
         </div>
       </div>
-      <div class="rates-strip" id="ratesStrip"></div>
     </div>
   </section>
 
-  <section class="block" id="earnings">
+  <section class="sec" id="agenda" aria-labelledby="h-agenda">
     <div class="wrap">
-      <div class="head reveal">
-        <div class="eyebrow">Earnings</div>
-        <h2>In arrivo</h2>
-        <p>Le prossime trimestrali dei titoli in copertura.</p>
+      <div class="sec-head">
+        <h2 id="h-agenda">Agenda</h2>
+        <span class="sec-meta">trimestrali in arrivo e documenti che possono muovere i prezzi</span>
       </div>
-      <div class="earn-list reveal" id="earningsList"></div>
+      <div class="two">
+        <div class="card" id="earnPanel">
+          <h3 class="card-h">Trimestrali</h3>
+          <div class="fchips" id="earnDays"></div>
+          <div class="elist" id="earnList"></div>
+          <button class="link-btn more" id="earnMore" type="button" hidden></button>
+        </div>
+        <div class="card" id="trigPanel">
+          <h3 class="card-h">Catalizzatori</h3>
+          <div class="fchips" id="trigKinds"></div>
+          <div class="tlist" id="trigList"></div>
+          <button class="link-btn more" id="trigMore" type="button" hidden></button>
+        </div>
+      </div>
     </div>
   </section>
 
-  <section class="block" id="triggers">
+  <section class="sec" id="notizie" aria-labelledby="h-notizie">
     <div class="wrap">
-      <div class="head reveal">
-        <div class="eyebrow">Catalizzatori</div>
-        <h2>Ordini esecutivi &amp; eventi societari</h2>
-        <p>Ordini esecutivi e comunicazioni societarie che possono muovere i mercati.</p>
+      <div class="sec-head">
+        <h2 id="h-notizie">Notizie</h2>
+        <span class="sec-meta">economia e politica monetaria, da testate selezionate</span>
       </div>
-      <div class="trig-list reveal" id="triggersList"></div>
-    </div>
-  </section>
-
-  <section class="block" id="notizie">
-    <div class="wrap">
-      <div class="head reveal">
-        <div class="eyebrow">Notizie</div>
-        <h2>Titoli del giorno</h2>
-        <p>Titoli di giornata che possono muovere i mercati nel breve termine.</p>
-      </div>
-      <div class="headlines" id="headlines"></div>
+      <div class="fchips" id="newsTopics"></div>
+      <div class="card nlist" id="newsList"></div>
+      <p class="note" id="newsNote"></p>
     </div>
   </section>
 
@@ -157,7 +177,7 @@
 
 <section class="error-state" id="errorState" hidden>
   <div class="wrap">
-    <div class="error-card glass">
+    <div class="card error-card">
       <h2 id="errorTitle">Errore</h2>
       <p id="errorDetail" class="muted"></p>
     </div>
@@ -166,25 +186,38 @@
 
 <footer>
   <div class="wrap foot">
-    <div class="foot-brand">
-      <div class="brand"><span class="brand-name">ForwardGuidex</span></div>
-      <div class="disc">EOD Market Dashboard · dati end-of-day, pubblicati staticamente. Fatti e contesto; le
-        decisioni e i rischi sono tuoi. Non è consulenza finanziaria.</div>
+    <div class="foot-l">
+      <span class="brand-name">ForwardGuidex</span>
+      <p>Dati end-of-day pubblicati staticamente. Fatti e contesto: le decisioni e i rischi sono tuoi. Non è consulenza finanziaria.</p>
+      <p class="keys"><kbd>/</kbd> cerca · <kbd>←</kbd><kbd>→</kbd> scorri nel dettaglio · <kbd>Esc</kbd> chiudi</p>
     </div>
-    <div class="attrib">
-      <div class="attr-block" id="attrTreasury"></div>
-      <div class="attr-block" id="attrNyfed"></div>
-      <div class="attr-block" id="attrBis"></div>
-    </div>
+    <div class="attrib" id="attrib"></div>
   </div>
 </footer>
 
-<div class="overlay" id="overlay" aria-hidden="true">
-  <div class="sheet-wrap" id="sheetWrap">
-    <div class="sheet" role="dialog" aria-modal="true" id="sheet">
-      <button class="close" id="close" aria-label="Chiudi">×</button>
-      <div id="sheetBody"></div>
+<!-- detail drawer -->
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="Dettaglio" hidden>
+  <div class="drawer-top">
+    <button class="icon-btn" id="drawerBack" type="button" aria-label="Indietro" title="Indietro" hidden>←</button>
+    <div class="drawer-nav" id="drawerNav"></div>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="drawerClose" type="button" aria-label="Chiudi" title="Chiudi (Esc)">×</button>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<!-- search palette -->
+<div class="palette" id="palette" hidden>
+  <div class="pal-box" role="dialog" aria-modal="true" aria-label="Cerca">
+    <div class="pal-in">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.5 15.5 L20 20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <input id="palInput" type="text" placeholder="Strumento, ticker, settore o sezione…" autocomplete="off" spellcheck="false"
+             role="combobox" aria-expanded="true" aria-controls="palList" aria-autocomplete="list" />
+      <kbd>Esc</kbd>
     </div>
+    <ul class="pal-list" id="palList" role="listbox" aria-label="Risultati"></ul>
+    <p class="pal-empty" id="palEmpty" hidden>Nessun risultato.</p>
   </div>
 </div>
 
@@ -214,7 +247,7 @@
   <div class="chat-head">
     <div class="chat-head-l">
       <div class="chat-title">Assistente AI</div>
-      <div class="chat-sub muted">Esperto di finanza e mercati</div>
+      <div class="chat-sub">Esperto di finanza e mercati</div>
     </div>
     <div class="chat-head-actions">
       <button class="chat-web" id="chatWeb" type="button" data-mode="auto"

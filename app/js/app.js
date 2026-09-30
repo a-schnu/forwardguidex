@@ -2,1021 +2,210 @@
  *
  * Security posture:
  *   - Every scalar value from the snapshot is written via textContent (never innerHTML).
- *   - The ONLY innerHTML assignment is the Morning Brief, and only on DOMPurify-sanitised
- *     output of marked.parse(). External links go through setSafeExternalLink (https-only).
+ *   - The ONLY innerHTML assignment here is the Morning Brief, and only on DOMPurify-
+ *     sanitised output of marked.parse(). External links go through setSafeExternalLink
+ *     (https-only). Chat replies follow the same rule inside chat.js.
  *   - marked / DOMPurify are self-hosted globals loaded before this module.
  */
 
-import { loadSnapshot } from './data.js';
+import { loadSnapshot, marketStateCosmetic } from './data.js';
+import {
+  el, isNum, arr, fmtPrice, fmtNum, fmtPct, fmtBp, fmtRate, fmtDate, fmtDay, fmtDateTime, signClass,
+  pctChip, segmented, flipReorder, makeSafeLink, setSafeExternalLink, parseSeendate, relTime, onWidthChange, REDUCE
+} from './util.js';
+import { sparkline, yieldCurveChart, magnitudeBar } from './charts.js';
+import { wireChat, setChatSnapshot, setViewContext } from './chat.js';
+import { initDrawer, openInstrument, openSector, openBrief, drawerContext } from './drawer.js';
+import { initPalette } from './palette.js';
 
-/* Loaded snapshot, stashed in main() so the AI chat widget can build its
- * grounding context from the same in-memory data the dashboard renders. */
-let currentSnapshot = null;
+const $ = (id) => document.getElementById(id);
 
-/* ---------- small DOM + format helpers ---------- */
+/* ---------- labels ---------- */
 
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text != null) node.textContent = text;
-  return node;
-}
-
-const NF2 = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-function fmtNum(x) {
-  return typeof x === 'number' && Number.isFinite(x) ? NF2.format(x) : '—';
-}
-function fmtPct(x) {
-  if (typeof x !== 'number' || !Number.isFinite(x)) return '—';
-  return (x > 0 ? '+' : '') + NF2.format(x) + '%';
-}
-function signClass(x) {
-  if (typeof x !== 'number' || !Number.isFinite(x) || x === 0) return 'flat';
-  return x > 0 ? 'up' : 'down';
-}
-function fmtDateTime(iso) {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return String(iso || '—');
-  return new Intl.DateTimeFormat('it-IT', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(d) + ' UTC';
-}
-function fmtDate(iso) {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return String(iso || '—');
-  return new Intl.DateTimeFormat('it-IT', { dateStyle: 'medium', timeZone: 'UTC' }).format(d);
-}
-function fmtSeendate(s) {
-  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(String(s || ''));
-  if (!m) return String(s || '');
-  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
-  return new Intl.DateTimeFormat('it-IT', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(d) + ' UTC';
-}
-
-/**
- * Safe external link. Only https: URLs become anchors (with rel/target hardening);
- * anything else is rendered as inert plain text.
- */
-function makeSafeLink(text, url) {
-  let ok = false;
-  try { ok = new URL(url, location.href).protocol === 'https:'; } catch (_e) { ok = false; }
-  if (ok) {
-    const a = el('a', 'ext-link', text);
-    a.setAttribute('href', url);
-    a.setAttribute('rel', 'noopener noreferrer');
-    a.setAttribute('target', '_blank');
-    return a;
-  }
-  return el('span', 'ext-link disabled', text);
-}
-
-/**
- * Harden an existing anchor (from sanitised brief HTML). Replaces non-https links
- * with inert text; hardens https links with rel/target.
- */
-function setSafeExternalLink(a) {
-  const url = a.getAttribute('href') || '';
-  let ok = false;
-  try { ok = new URL(url, location.href).protocol === 'https:'; } catch (_e) { ok = false; }
-  if (ok) {
-    a.setAttribute('rel', 'noopener noreferrer');
-    a.setAttribute('target', '_blank');
-    return;
-  }
-  const span = el('span', 'ext-link disabled', a.textContent || url);
-  if (a.parentNode) a.parentNode.replaceChild(span, a);
-}
-
-/* ---------- inline SVG + motion helpers (CSP-safe: no external libs) ----------
- * Charts are built as inline SVG via createElementNS; geometry is set via
- * ATTRIBUTES (setAttribute), never a style="" string. Animation is driven by CSS
- * classes/keyframes in base.css; the only CSSOM writes are el.style.setProperty
- * (custom props like --spark-len) and tooltip positioning, both permitted by CSP.
- */
-
-const SVGNS = 'http://www.w3.org/2000/svg';
-const REDUCE = window.matchMedia('(prefers-reduced-motion: reduce)');
-
-function svgEl(tag, attrs) {
-  const node = document.createElementNS(SVGNS, tag);
-  if (attrs) {
-    for (const k in attrs) {
-      if (Object.prototype.hasOwnProperty.call(attrs, k)) node.setAttribute(k, attrs[k]);
-    }
-  }
-  return node;
-}
-
-/** Polyline length from an array of [x,y] points (no DOM needed). */
-function polyLen(points) {
-  let len = 0;
-  for (let i = 1; i < points.length; i++) {
-    len += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
-  }
-  return len;
-}
-
-/**
- * Small sparkline from item.spark (array of numbers, may be undefined/sparse).
- * Returns an <svg> element, or null when there isn't enough data to draw.
- */
-function buildSparkline(item) {
-  const raw = Array.isArray(item && item.spark)
-    ? item.spark.filter((v) => typeof v === 'number' && Number.isFinite(v))
-    : [];
-  if (raw.length < 2) return null;
-
-  const W = 120, H = 32, pad = 3;
-  const min = Math.min.apply(null, raw);
-  const max = Math.max.apply(null, raw);
-  const span = (max - min) || 1;
-  const n = raw.length;
-  const xAt = (i) => pad + (i / (n - 1)) * (W - 2 * pad);
-  const yAt = (v) => pad + (1 - (v - min) / span) * (H - 2 * pad);
-
-  const pts = raw.map((v, i) => [xAt(i), yAt(v)]);
-  const line = 'M' + pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' L');
-  const area = line
-    + ' L' + xAt(n - 1).toFixed(1) + ',' + (H - pad).toFixed(1)
-    + ' L' + xAt(0).toFixed(1) + ',' + (H - pad).toFixed(1) + ' Z';
-  const len = Math.ceil(polyLen(pts));
-
-  // Colour follows the line's OWN trend (last vs first finite value), not ret_1d.
-  const trend = signClass(raw[raw.length - 1] - raw[0]);
-
-  const svg = svgEl('svg', {
-    'class': 'spark ' + trend,
-    viewBox: '0 0 ' + W + ' ' + H,
-    preserveAspectRatio: 'none',
-    'aria-hidden': 'true'
-  });
-  svg.appendChild(svgEl('path', { 'class': 'spark-area', d: area }));
-  const lineEl = svgEl('path', { 'class': 'spark-line', d: line, 'stroke-dasharray': len });
-  lineEl.style.setProperty('--spark-len', String(len));
-  svg.appendChild(lineEl);
-  return svg;
-}
-
-/**
- * Diverging horizontal bar (SVG rect) around a centre baseline. Used by the
- * sector overview chart and the sector-detail constituents chart. Growth is a
- * CSS keyframe; positive bars grow from the left of centre, negative from the right.
- */
-function divergingBar(value, maxAbs, opts) {
-  const W = 200, H = (opts && opts.h) || 18, cx = W / 2;
-  const frac = maxAbs > 0 ? Math.min(1, Math.abs(value) / maxAbs) : 0;
-  const w = Math.max(frac * (W / 2 - 2), 0.6);
-  const pos = value >= 0;
-  const svg = svgEl('svg', {
-    'class': (opts && opts.cls) || 'div-svg',
-    viewBox: '0 0 ' + W + ' ' + H,
-    preserveAspectRatio: 'none',
-    'aria-hidden': 'true'
-  });
-  svg.appendChild(svgEl('line', { 'class': 'bar-zero', x1: cx, y1: 0, x2: cx, y2: H }));
-  const barClass = 'bar ' + (pos ? 'pos' : 'neg') + (opts && opts.color ? ' ' + opts.color : '');
-  svg.appendChild(svgEl('rect', {
-    'class': barClass,
-    x: (pos ? cx : cx - w).toFixed(1), y: Math.round(H * 0.14),
-    width: w.toFixed(1), height: Math.round(H * 0.72), rx: 2
-  }));
-  return svg;
-}
-
-/* ---------- count-up + chart-draw on scroll into view ---------- */
-
-function fmtCountUp(v, kind) {
-  if (kind === 'pctval') return fmtNum(v) + '%';
-  return fmtNum(v);
-}
-
-function animateValue(node) {
-  const target = parseFloat(node.getAttribute('data-countup'));
-  const finalText = node.getAttribute('data-final');
-  if (!Number.isFinite(target)) { if (finalText != null) node.textContent = finalText; return; }
-  const kind = node.getAttribute('data-fmt') || '';
-  const dur = 850, t0 = performance.now();
-  function frame(now) {
-    const p = Math.min(1, (now - t0) / dur);
-    const eased = 1 - Math.pow(1 - p, 3);
-    node.textContent = fmtCountUp(target * eased, kind);
-    if (p < 1) requestAnimationFrame(frame);
-    else if (finalText != null) node.textContent = finalText;
-  }
-  requestAnimationFrame(frame);
-}
-
-function runCountUp(root) {
-  if (!root || !root.querySelectorAll) return;
-  root.querySelectorAll('[data-countup]').forEach(animateValue);
-}
-
-/** Marks a value node for count-up (falls back to its own text if never triggered). */
-function markCountUp(node, value, kind) {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    node.setAttribute('data-countup', value);
-    node.setAttribute('data-final', node.textContent);
-    if (kind) node.setAttribute('data-fmt', kind);
-  }
-  return node;
-}
-
-let vizObserver = null;
-
-/** Observe [data-viz] hosts: add `.viz` (drives CSS chart keyframes) + count-up. */
-function wireViz() {
-  const hosts = document.querySelectorAll('[data-viz]');
-  if (REDUCE.matches) {
-    // No motion: leave charts in their static (fully drawn) state, values final.
-    return;
-  }
-  vizObserver = new IntersectionObserver((entries) => {
-    entries.forEach((en) => {
-      if (en.isIntersecting) {
-        en.target.classList.add('viz');
-        runCountUp(en.target);
-        vizObserver.unobserve(en.target);
-      }
-    });
-  }, { threshold: 0.2 });
-  hosts.forEach((h) => vizObserver.observe(h));
-}
-
-/* ---------- top bar ---------- */
-
-function renderTopBar(meta) {
-  document.getElementById('dataAsOf').textContent = fmtDateTime(meta.data_as_of);
-
-  if (meta && meta.is_demo) {
-    const ribbon = document.getElementById('demoRibbon');
-    if (ribbon) ribbon.hidden = false;
-  }
-}
-
-/* ---------- KPI strip ---------- */
-
-/**
- * Cosmetic-only ticker -> region map for grouping the overview. No schema field
- * for region; anything unmapped falls into "Altri" (defensive).
- */
+/** Cosmetic ticker -> region map for grouping indices; unmapped falls into "Altri". */
 const REGION_BY_TICKER = {
-  // Americhe
   '^GSPC': 'Americhe', '^NDX': 'Americhe', '^DJI': 'Americhe', '^RUT': 'Americhe',
-  // Europa
   '^STOXX': 'Europa', '^STOXX50E': 'Europa', '^GDAXI': 'Europa', '^FCHI': 'Europa',
   '^FTSE': 'Europa', 'FTSEMIB.MI': 'Europa',
-  // Asia
   '^N225': 'Asia', '^HSI': 'Asia', '000001.SS': 'Asia', '^KS11': 'Asia'
 };
 const REGION_ORDER = ['Americhe', 'Europa', 'Asia', 'Altri'];
 
-/** Short factual description shown under the active Overview tab (§9c). */
-const TAB_DESC = {
-  indici: 'Principali listini azionari di Americhe, Europa e Asia.',
-  futures: 'Energia, metalli, prodotti agricoli e cambi.',
-  etf: 'Fondi quotati su indici, aree geografiche e temi.',
-  crypto: 'Le principali criptovalute per capitalizzazione.'
+/** Title-derived economic topics (serve/snapshot.py `_economic_headlines`). */
+const TOPIC_LABELS = {
+  banche_centrali: 'Banche centrali', inflazione: 'Inflazione', lavoro: 'Lavoro',
+  commercio: 'Commercio', energia: 'Energia', debito_bond: 'Debito & bond', crescita: 'Crescita'
+};
+function topicLabel(k) {
+  if (TOPIC_LABELS[k]) return TOPIC_LABELS[k];
+  const s = String(k || '').replace(/_/g, ' ');
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : '—';
+}
+
+const OUTLETS = {
+  'reuters.com': 'Reuters', 'bloomberg.com': 'Bloomberg', 'ft.com': 'Financial Times', 'wsj.com': 'WSJ',
+  'cnbc.com': 'CNBC', 'marketwatch.com': 'MarketWatch', 'apnews.com': 'AP', 'economist.com': 'The Economist',
+  'barrons.com': 'Barron\'s', 'nytimes.com': 'New York Times', 'theguardian.com': 'The Guardian',
+  'bbc.co.uk': 'BBC', 'bbc.com': 'BBC', 'ilsole24ore.com': 'Il Sole 24 Ore', 'ansa.it': 'ANSA'
+};
+function outlet(domain) {
+  const d = String(domain || '').replace(/^www\./, '');
+  return OUTLETS[d] || d;
+}
+
+const TAB_DEFS = [
+  { id: 'indici', label: 'Indici', key: 'indices', kind: 'Indice' },
+  { id: 'futures', label: 'Futures & materie prime', key: 'futures', kind: 'Future' },
+  { id: 'etf', label: 'ETF', key: 'etfs', kind: 'ETF' },
+  { id: 'crypto', label: 'Crypto', key: 'crypto', kind: 'Crypto' }
+];
+
+/* ---------- registry ---------- */
+
+const instruments = new Map();   // ticker -> { item, kind, sector }
+const sectors = new Map();       // key -> sector
+
+function register(item, kind, sectorKey) {
+  if (!item || !item.ticker) return;
+  const prev = instruments.get(item.ticker);
+  if (!prev) {
+    instruments.set(item.ticker, { item: item, kind: kind, sector: sectorKey || null });
+    return;
+  }
+  if (!arr(prev.item.spark).length && arr(item.spark).length) prev.item = Object.assign({}, item, prev.item, { spark: item.spark });
+  if (!prev.sector && sectorKey) prev.sector = sectorKey;
+}
+
+function buildRegistry(snap) {
+  TAB_DEFS.forEach((t) => arr(snap[t.key]).forEach((it) => register(it, t.kind)));
+  arr(snap.sectors).forEach((s) => {
+    sectors.set(s.key, s);
+    arr(s.etfs).forEach((it) => register(it, 'ETF', s.key));
+    arr(s.constituents).forEach((it) => register(it, 'Azione', s.key));
+  });
+  const byLabel = new Map(arr(snap.sectors).map((s) => [s.label, s.key]));
+  const mv = snap.movers || {};
+  arr(mv.gainers).concat(arr(mv.losers)).forEach((it) => register(it, 'Azione', byLabel.get(it.sector)));
+}
+
+/* ---------- header: status + tape ---------- */
+
+function renderStatus(meta) {
+  const ms = marketStateCosmetic();
+  const mkt = $('mktState');
+  mkt.classList.toggle('open', ms.open);
+  $('mktLabel').textContent = ms.open ? 'USA aperto' : 'USA chiuso';
+  mkt.title = ms.label;
+
+  const asof = $('asOf');
+  // A date-only as-of arrives as midnight UTC; printing "00:00 UTC" would invent a time.
+  const dateOnly = /T00:00(:00(\.0+)?)?(Z|[+-]00:?00)?$/.test(String(meta.data_as_of || ''));
+  asof.textContent = 'Dati al ' + (dateOnly ? fmtDate(meta.data_as_of) : fmtDateTime(meta.data_as_of));
+  if (meta.generated_at) asof.title = 'Snapshot generato ' + fmtDateTime(meta.generated_at);
+  const issues = [];
+  if (meta.freshness && meta.freshness !== 'FRESH') issues.push('dati ' + String(meta.freshness).toLowerCase());
+  if (meta.quality && meta.quality !== 'OK') issues.push('qualità ' + String(meta.quality).toLowerCase());
+  const q = $('quality');
+  q.classList.toggle('warn', issues.length > 0);
+  q.title = issues.length ? 'Attenzione: ' + issues.join(', ') + '. Vedi le note nelle sezioni.' : 'Dati completi e aggiornati';
+  q.setAttribute('aria-label', q.title);
+  if (meta.is_demo) $('demoTag').hidden = false;
+}
+
+const TAPE_FUTURES = ['CL=F', 'BZ=F', 'NG=F', 'GC=F', 'SI=F', 'HG=F', '6E=F', 'ZN=F'];
+
+function renderTape(snap) {
+  const track = $('tapeTrack');
+  track.textContent = '';
+  const futures = arr(snap.futures);
+  const pick = arr(snap.indices)
+    .concat(TAPE_FUTURES.map((t) => futures.find((f) => f.ticker === t)).filter(Boolean))
+    .concat(arr(snap.crypto).slice(0, 3));
+  if (!pick.length) { $('tape').hidden = true; return; }
+  const tickers = pick.map((it) => it.ticker);
+  const build = (clone) => {
+    const g = el('div', 'tape-group');
+    if (clone) g.setAttribute('aria-hidden', 'true');
+    pick.forEach((it) => {
+      const b = el('button', 'tape-item');
+      b.type = 'button';
+      b.setAttribute('data-tk', it.ticker);
+      if (clone) b.tabIndex = -1;
+      b.appendChild(el('span', 'tape-n', it.name || it.ticker));
+      b.appendChild(el('span', 'tape-v num', fmtPrice(it.last)));
+      b.appendChild(el('span', 'chg ' + signClass(it.ret_1d), fmtPct(it.ret_1d)));
+      b.addEventListener('click', () => openInstrument(it.ticker, tickers));
+      g.appendChild(b);
+    });
+    return g;
+  };
+  track.appendChild(build(false));
+  track.appendChild(build(true));
+  track.style.setProperty('--tape-dur', Math.max(40, pick.length * 3.2) + 's');
+}
+
+/* ---------- Morning Brief ---------- */
+
+const BRIEF_SANITIZE = {
+  ALLOWED_TAGS: ['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'li', 'strong', 'em', 'blockquote', 'code', 'pre', 'a', 'br'],
+  ALLOWED_ATTR: ['href', 'title'],
+  ALLOW_DATA_ATTR: false,
+  ALLOW_ARIA_ATTR: false
 };
 
-function kpiCard(item) {
-  const card = el('div', 'kpi glass');
-  card.setAttribute('data-viz', '');
+let briefNode = null;
 
-  const inner = el('div', 'kpi-inner');
+/**
+ * Sanitise the brief once. The page shows its lead + first bullets; the drawer
+ * shows the whole thing (a clone of this sanitised DOM).
+ */
+function renderBrief(snap) {
+  const strip = $('brief');
+  const b = snap.brief || {};
+  const md = typeof b.markdown === 'string' ? b.markdown.trim() : '';
+  if (!md) { strip.hidden = true; return; }
 
-  // Front face: name, price, returns, sparkline.
-  const front = el('div', 'kpi-front');
-  front.appendChild(el('div', 'kpi-name', item.name));
-  const val = el('div', 'kpi-val');
-  val.appendChild(markCountUp(el('span', 'kpi-last', fmtNum(item.last)), item.last));
-  val.appendChild(el('span', 'kpi-ccy', item.currency || ''));
-  front.appendChild(val);
-  const rets = el('div', 'kpi-rets');
-  rets.appendChild(el('span', 'ret ' + signClass(item.ret_1d), fmtPct(item.ret_1d)));
-  rets.appendChild(el('span', 'ret-5 muted', '5gg ' + fmtPct(item.ret_5d)));
-  front.appendChild(rets);
-  const spark = buildSparkline(item);
-  if (spark) {
-    const holder = el('div', 'kpi-spark');
-    holder.appendChild(spark);
-    front.appendChild(holder);
+  const node = el('div');
+  // Only place innerHTML is used on this page, and only on sanitised output.
+  node.innerHTML = window.DOMPurify.sanitize(window.marked.parse(md), BRIEF_SANITIZE);
+  node.querySelectorAll('a').forEach(setSafeExternalLink);
+  enhanceBrief(node);
+  briefNode = node;
+
+  // Page summary: the regime line and the first list, cloned from sanitised DOM.
+  const lead = node.querySelector('.brief-regime') || node.querySelector('p');
+  const leadHost = $('briefLead');
+  leadHost.textContent = '';
+  if (lead) {
+    leadHost.textContent = lead.textContent.trim();
+    const m = /brief-regime-(up|down|flat)/.exec(lead.className || '');
+    leadHost.className = 'brief-lead tone-' + (m ? m[1] : 'flat');
   }
-  inner.appendChild(front);
-
-  // Flip-to-EUR only makes sense for NON-EUR instruments with a distinct EUR price.
-  const eurNum = (typeof item.eur === 'number' && Number.isFinite(item.eur)) ? item.eur : null;
-  const flippable = item.currency !== 'EUR' && eurNum != null && eurNum !== item.last;
-
-  if (flippable) {
-    card.classList.add('flippable');
-    card.setAttribute('role', 'button');
-    card.setAttribute('tabindex', '0');
-    card.setAttribute('aria-pressed', 'false');
-    card.setAttribute('aria-label', (item.name || item.ticker || 'Strumento') + ' — tocca per il prezzo in EUR');
-
-    const back = el('div', 'kpi-back');
-    const backVal = el('div', 'kpi-back-val');
-    backVal.appendChild(el('span', 'kpi-last', fmtNum(eurNum)));
-    backVal.appendChild(el('span', 'kpi-ccy', 'EUR'));
-    back.appendChild(backVal);
-    inner.appendChild(back);
-
-    const flip = () => {
-      const flipped = card.classList.toggle('flipped');
-      card.setAttribute('aria-pressed', flipped ? 'true' : 'false');
-    };
-    card.addEventListener('click', flip);
-    card.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); flip(); }
-    });
-  }
-
-  card.appendChild(inner);
-  return card;
-}
-
-function kpiGroup(label, items) {
-  const group = el('div', 'kpi-group');
-  if (label) group.appendChild(el('div', 'kpi-group-label', label));
-  const grid = el('div', 'kpi-grid');
-  items.forEach((it) => grid.appendChild(kpiCard(it)));
-  group.appendChild(grid);
-  return group;
-}
-
-/** A flat grid of KPI cards (futures / ETF / crypto tab panels). */
-function buildKpiGrid(items) {
-  const grid = el('div', 'kpi-grid');
-  items.forEach((it) => grid.appendChild(kpiCard(it)));
-  return grid;
-}
-
-/** Indices tab panel: KPI cards grouped by region (Americhe / Europa / Asia). */
-function buildIndicesPanel(indices) {
-  const wrap = el('div', 'kpi-groups');
-  const buckets = new Map(REGION_ORDER.map((r) => [r, []]));
-  indices.forEach((it) => {
-    const region = REGION_BY_TICKER[it.ticker] || 'Altri';
-    buckets.get(region).push(it);
+  const pts = $('briefPoints');
+  pts.textContent = '';
+  const firstList = node.querySelector('ul, ol');
+  arr(firstList ? [].slice.call(firstList.children) : []).slice(0, 6).forEach((li) => {
+    const c = li.cloneNode(true);
+    c.classList.add('bp');
+    pts.appendChild(c);
   });
-  REGION_ORDER.forEach((region) => {
-    const items = buckets.get(region);
-    if (items && items.length) wrap.appendChild(kpiGroup(region, items));
-  });
-  return wrap;
+  $('briefWhen').textContent = b.created_at ? fmtDateTime(b.created_at) : '';
+  strip.hidden = false;
+  const open = () => openBrief();
+  $('briefOpen').addEventListener('click', open);
+  pts.addEventListener('click', open);
 }
 
 /**
- * Overview as accessible tabs by asset class. Tabs with no data are omitted; the
- * first available tab is selected by default. Full ARIA tab pattern + arrow nav.
+ * Class-only enrichment of the sanitised brief: drop the redundant H1 title
+ * (the panel has its own header), mark the regime line and the two horizon
+ * blocks. No new innerHTML, no icons.
  */
-function renderOverview(snapshot) {
-  const tablist = document.getElementById('ovTablist');
-  const panels = document.getElementById('ovPanels');
-  const desc = document.getElementById('ovTabDesc');
-  if (!tablist || !panels) return;
-  tablist.textContent = '';
-  panels.textContent = '';
-
-  const indices = Array.isArray(snapshot.indices) ? snapshot.indices : [];
-  const futures = Array.isArray(snapshot.futures) ? snapshot.futures : [];
-  const etfs = Array.isArray(snapshot.etfs) ? snapshot.etfs : [];
-  const crypto = Array.isArray(snapshot.crypto) ? snapshot.crypto : [];
-
-  const defs = [
-    { id: 'indici', label: 'Indici', has: indices.length, build: () => buildIndicesPanel(indices) },
-    { id: 'futures', label: 'Futures & materie prime', has: futures.length, build: () => buildKpiGrid(futures) },
-    { id: 'etf', label: 'ETF', has: etfs.length, build: () => buildKpiGrid(etfs) },
-    { id: 'crypto', label: 'Crypto', has: crypto.length, build: () => buildKpiGrid(crypto) }
-  ].filter((t) => t.has);
-  if (!defs.length) return;
-  if (desc) desc.textContent = TAB_DESC[defs[0].id] || '';
-
-  const btns = [], pans = [];
-  defs.forEach((t, i) => {
-    const btn = el('button', 'ov-tab', t.label);
-    btn.id = 'ovtab-' + t.id;
-    btn.type = 'button';
-    btn.setAttribute('role', 'tab');
-    btn.setAttribute('aria-controls', 'ovpanel-' + t.id);
-    btn.setAttribute('aria-selected', i === 0 ? 'true' : 'false');
-    btn.setAttribute('tabindex', i === 0 ? '0' : '-1');
-    tablist.appendChild(btn);
-
-    const panel = el('div', 'ov-panel');
-    panel.id = 'ovpanel-' + t.id;
-    panel.setAttribute('role', 'tabpanel');
-    panel.setAttribute('aria-labelledby', 'ovtab-' + t.id);
-    panel.setAttribute('tabindex', '0');
-    panel.hidden = i !== 0;
-    panel.appendChild(t.build());
-    panels.appendChild(panel);
-
-    btns.push(btn); pans.push(panel);
-  });
-
-  const select = (idx, focus) => {
-    btns.forEach((b, k) => {
-      const on = k === idx;
-      b.setAttribute('aria-selected', on ? 'true' : 'false');
-      b.setAttribute('tabindex', on ? '0' : '-1');
-      pans[k].hidden = !on;
-    });
-    if (desc) desc.textContent = TAB_DESC[defs[idx].id] || '';
-    if (focus) btns[idx].focus();
-  };
-
-  btns.forEach((b, i) => {
-    b.addEventListener('click', () => select(i, false));
-    b.addEventListener('keydown', (e) => {
-      let ni = null;
-      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') ni = (i + 1) % btns.length;
-      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ni = (i - 1 + btns.length) % btns.length;
-      else if (e.key === 'Home') ni = 0;
-      else if (e.key === 'End') ni = btns.length - 1;
-      if (ni != null) { e.preventDefault(); select(ni, true); }
-    });
-  });
-}
-
-/* ---------- sectors (data-driven cards + zoom modal) ---------- */
-
-const sectorsByKey = new Map();
-
-function sectorCard(sector) {
-  const card = el('div', 'scard glass');
-  card.setAttribute('data-key', sector.key);
-  card.setAttribute('role', 'button');
-  card.setAttribute('tabindex', '0');
-  card.setAttribute('aria-label', sector.label + ' — apri il dettaglio');
-
-  const top = el('div');
-  top.appendChild(el('div', 'tag', 'Settore'));
-  top.appendChild(el('h3', null, sector.label));
-  const tickers = []
-    .concat(sector.etfs || [], sector.constituents || [])
-    .map((x) => x.ticker)
-    .filter(Boolean)
-    .join(' · ');
-  top.appendChild(el('div', 'desc', tickers));
-  card.appendChild(top);
-
-  const foot = el('div', 'foot');
-  const left = el('div');
-  left.appendChild(el('div', 'pct ' + signClass(sector.avg_ret_1d), fmtPct(sector.avg_ret_1d)));
-  left.appendChild(el('div', 'etfs', '5gg ' + fmtPct(sector.avg_ret_5d)));
-  foot.appendChild(left);
-  foot.appendChild(el('span', 'more', 'Apri ↗'));
-  card.appendChild(foot);
-  return card;
-}
-
-function itemsTable(title, items) {
-  const panel = el('div', 'panel');
-  panel.appendChild(el('h5', null, title));
-  const table = el('table', 'tbl');
-  const thead = el('thead');
-  const htr = el('tr');
-  [['Ticker', ''], ['Nome', ''], ['Ultimo', 'r'], ['1g', 'r'], ['5gg', 'r']].forEach((h) => {
-    htr.appendChild(el('th', h[1] || null, h[0]));
-  });
-  thead.appendChild(htr);
-  table.appendChild(thead);
-  const tbody = el('tbody');
-  (items || []).forEach((it) => {
-    const tr = el('tr');
-    tr.appendChild(el('td', 'tk', it.ticker));
-    tr.appendChild(el('td', 'nm', it.name));
-    tr.appendChild(el('td', 'num', fmtNum(it.last)));
-    tr.appendChild(el('td', 'num ' + signClass(it.ret_1d), fmtPct(it.ret_1d)));
-    tr.appendChild(el('td', 'num ' + signClass(it.ret_5d), fmtPct(it.ret_5d)));
-    tbody.appendChild(tr);
-  });
-  table.appendChild(tbody);
-  panel.appendChild(table);
-  return panel;
-}
-
-/** Diverging bar chart of every sector's avg 1d return, sorted, above the carousel. */
-function renderSectorBars(sectors) {
-  const host = document.getElementById('sectorBars');
-  if (!host) return;
-  host.textContent = '';
-  const list = (Array.isArray(sectors) ? sectors : [])
-    .filter((s) => Number.isFinite(s.avg_ret_1d))
-    .slice()
-    .sort((a, b) => b.avg_ret_1d - a.avg_ret_1d);
-  if (list.length < 2) { host.hidden = true; return; }
-  host.hidden = false;
-  const maxAbs = Math.max.apply(null, list.map((s) => Math.abs(s.avg_ret_1d)).concat(0.01));
-  list.forEach((s) => {
-    const row = el('div', 'sbar-row');
-    row.appendChild(el('div', 'sbar-label', s.label));
-    const track = el('div', 'sbar-track');
-    track.appendChild(divergingBar(s.avg_ret_1d, maxAbs, { cls: 'sbar-svg', color: signClass(s.avg_ret_1d) }));
-    row.appendChild(track);
-    row.appendChild(el('div', 'sbar-val ' + signClass(s.avg_ret_1d), fmtPct(s.avg_ret_1d)));
-    host.appendChild(row);
-  });
-  host.setAttribute('data-viz', '');
-}
-
-/** Small yellow-accented bar chart of constituents' 1d returns (sector modal). */
-function constituentsChart(items) {
-  const list = (Array.isArray(items) ? items : []).filter((it) => Number.isFinite(it.ret_1d));
-  if (list.length < 2) return null;
-  const panel = el('div', 'panel cpanel');
-  panel.appendChild(el('h5', null, 'Rendimenti 1g'));
-  const chart = el('div', 'cbars');
-  const maxAbs = Math.max.apply(null, list.map((it) => Math.abs(it.ret_1d)).concat(0.01));
-  list.forEach((it) => {
-    const row = el('div', 'cbar-row');
-    row.appendChild(el('div', 'cbar-label', it.name || it.ticker));
-    const track = el('div', 'cbar-track');
-    track.appendChild(divergingBar(it.ret_1d, maxAbs, { cls: 'cbar-svg', h: 16, color: 'cbar' }));
-    row.appendChild(track);
-    row.appendChild(el('div', 'cbar-val ' + signClass(it.ret_1d), fmtPct(it.ret_1d)));
-    chart.appendChild(row);
-  });
-  panel.appendChild(chart);
-  return panel;
-}
-
-let lastFocusedBeforeModal = null;
-
-function openSectorModal(card) {
-  const sector = sectorsByKey.get(card.getAttribute('data-key'));
-  if (!sector) return;
-  const body = document.getElementById('sheetBody');
-  body.textContent = '';
-
-  body.appendChild(el('div', 's-tag', 'Settore'));
-  const title = el('div', 's-title');
-  title.appendChild(el('h3', null, sector.label));
-  title.appendChild(el('span', 's-pct ' + signClass(sector.avg_ret_1d), fmtPct(sector.avg_ret_1d)));
-  body.appendChild(title);
-
-  // Yellow-accented key figures (labels stay muted, values pop).
-  const why = el('p', 's-why');
-  why.appendChild(document.createTextNode('Media 1 giorno '));
-  why.appendChild(el('span', 'accent-y', fmtPct(sector.avg_ret_1d)));
-  why.appendChild(document.createTextNode(' · Media 5 giorni '));
-  why.appendChild(el('span', 'accent-y', fmtPct(sector.avg_ret_5d)));
-  body.appendChild(why);
-
-  const cchart = constituentsChart(sector.constituents);
-  if (cchart) body.appendChild(cchart);
-
-  const grid = el('div', 's-grid');
-  grid.appendChild(itemsTable('ETF', sector.etfs));
-  grid.appendChild(itemsTable('Titoli', sector.constituents));
-  body.appendChild(grid);
-
-  // Trigger the bar-grow keyframe (skipped under reduced motion — bars stay drawn).
-  body.classList.remove('viz');
-  if (!REDUCE.matches) { void body.offsetWidth; body.classList.add('viz'); }
-
-  const overlay = document.getElementById('overlay');
-  const wrap = document.getElementById('sheetWrap');
-  const r = card.getBoundingClientRect();
-  wrap.style.setProperty('--ox', (r.left + r.width / 2) + 'px');
-  wrap.style.setProperty('--oy', (r.top + r.height / 2) + 'px');
-  overlay.style.display = 'block';
-  void overlay.offsetWidth; // force reflow so the zoom transition runs
-  overlay.classList.add('open');
-  overlay.setAttribute('aria-hidden', 'false');
-  document.body.style.overflow = 'hidden';
-
-  // Move focus into the dialog for keyboard/AT users; remember where to return.
-  lastFocusedBeforeModal = card;
-  const closeBtn = document.getElementById('close');
-  if (closeBtn) closeBtn.focus();
-}
-
-function closeModal() {
-  const overlay = document.getElementById('overlay');
-  overlay.classList.remove('open');
-  overlay.setAttribute('aria-hidden', 'true');
-  document.body.style.overflow = '';
-  if (lastFocusedBeforeModal && typeof lastFocusedBeforeModal.focus === 'function') {
-    lastFocusedBeforeModal.focus();
-    lastFocusedBeforeModal = null;
-  }
-  setTimeout(() => {
-    if (!overlay.classList.contains('open')) overlay.style.display = 'none';
-  }, 560);
-}
-
-function renderSectors(snapshot) {
-  const track = document.getElementById('track');
-  const dots = document.getElementById('dots');
-  track.textContent = '';
-  dots.textContent = '';
-  sectorsByKey.clear();
-
-  const sectors = Array.isArray(snapshot.sectors) ? snapshot.sectors : [];
-  renderSectorBars(sectors);
-  sectors.forEach((s) => {
-    sectorsByKey.set(s.key, s);
-    track.appendChild(sectorCard(s));
-  });
-
-  const cards = [].slice.call(track.children);
-
-  // dots
-  cards.forEach((_, i) => {
-    const b = el('button', 'dot' + (i === 0 ? ' active' : ''));
-    b.setAttribute('aria-label', 'Vai al settore ' + (i + 1));
-    b.addEventListener('click', () => {
-      track.scrollTo({ left: cards[i].offsetLeft - cards[0].offsetLeft, behavior: 'smooth' });
-    });
-    dots.appendChild(b);
-  });
-  const dotEls = [].slice.call(dots.children);
-  const step = () => (cards.length > 1 ? cards[1].offsetLeft - cards[0].offsetLeft : 1);
-  track.addEventListener('scroll', () => {
-    const i = Math.max(0, Math.min(cards.length - 1, Math.round(track.scrollLeft / step())));
-    dotEls.forEach((d, k) => d.classList.toggle('active', k === i));
-  });
-
-  // drag-to-scroll + click-to-open
-  let down = false, moved = false, sx = 0, sl = 0;
-  track.addEventListener('pointerdown', (e) => { down = true; moved = false; sx = e.pageX; sl = track.scrollLeft; });
-  window.addEventListener('pointermove', (e) => {
-    if (!down) return;
-    if (Math.abs(e.pageX - sx) > 6) { moved = true; track.classList.add('drag'); }
-    track.scrollLeft = sl - (e.pageX - sx);
-  });
-  window.addEventListener('pointerup', () => { down = false; track.classList.remove('drag'); });
-  cards.forEach((c) => {
-    c.addEventListener('click', () => { if (!moved) openSectorModal(c); });
-    c.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
-        e.preventDefault();
-        openSectorModal(c);
-      }
-    });
-  });
-}
-
-/* ---------- rates ---------- */
-
-function rateChip(r) {
-  const chip = el('div', 'rate glass');
-  chip.setAttribute('data-viz', '');
-  chip.appendChild(el('div', 'rate-name', r.name));
-  const row = el('div', 'rate-row');
-  row.appendChild(markCountUp(el('span', 'rate-val', fmtNum(r.value) + '%'), r.value, 'pctval'));
-  row.appendChild(el('span', 'rate-chg ' + signClass(r.chg), fmtPct(r.chg)));
-  chip.appendChild(row);
-  const meta = el('div', 'rate-meta');
-  meta.appendChild(el('span', 'src', r.source));
-  meta.appendChild(el('span', 'asof', fmtDate(r.as_of)));
-  chip.appendChild(meta);
-  return chip;
-}
-
-/* ---------- yield curve chart (inline SVG line/area + hover tooltip) ---------- */
-
-/** Parse a Treasury tenor (years) from a series_id like UST2Y / UST3M / UST10Y. */
-function tenorYears(seriesId) {
-  const m = /UST\s*(\d+(?:\.\d+)?)\s*(M|Y)/i.exec(seriesId || '');
-  if (!m) return null;
-  const n = parseFloat(m[1]);
-  return m[2].toUpperCase() === 'M' ? n / 12 : n;
-}
-
-function tenorLabel(years) {
-  if (years < 1) return Math.round(years * 12) + 'M';
-  return (Number.isInteger(years) ? years : years.toFixed(1)) + 'A';
-}
-
-function renderYieldCurve(rates) {
-  const wrap = document.getElementById('yieldCurveWrap');
-  const host = document.getElementById('yieldCurve');
-  const tip = document.getElementById('ycTip');
-  if (!wrap || !host) return;
-  host.textContent = '';
-
-  const pts = (Array.isArray(rates) ? rates : [])
-    .map((r) => ({ r: r, t: tenorYears(r.series_id) }))
-    .filter((p) => p.t != null && Number.isFinite(p.r.value))
-    .sort((a, b) => a.t - b.t);
-
-  if (pts.length < 2) { wrap.hidden = true; return; }
-  wrap.hidden = false;
-
-  const W = 640, H = 250;
-  const m = { l: 46, r: 18, t: 20, b: 40 };
-  const pw = W - m.l - m.r, ph = H - m.t - m.b;
-
-  const tMin = pts[0].t, tMax = pts[pts.length - 1].t;
-  const tSpan = (tMax - tMin) || 1;
-  const vals = pts.map((p) => p.r.value);
-  let vMin = Math.min.apply(null, vals), vMax = Math.max.apply(null, vals);
-  const vPad = ((vMax - vMin) || 1) * 0.25;
-  vMin -= vPad; vMax += vPad;
-  const vSpan = (vMax - vMin) || 1;
-
-  const xAt = (t) => m.l + ((t - tMin) / tSpan) * pw;
-  const yAt = (v) => m.t + (1 - (v - vMin) / vSpan) * ph;
-
-  const svg = svgEl('svg', {
-    'class': 'yc-svg', viewBox: '0 0 ' + W + ' ' + H,
-    role: 'img', 'aria-label': 'Curva dei rendimenti dei Treasury USA'
-  });
-
-  // y gridlines + labels (4 ticks)
-  const ticks = 4;
-  for (let i = 0; i <= ticks; i++) {
-    const v = vMin + (vSpan * i) / ticks;
-    const y = yAt(v);
-    svg.appendChild(svgEl('line', { 'class': 'yc-grid', x1: m.l, y1: y.toFixed(1), x2: W - m.r, y2: y.toFixed(1) }));
-    const lbl = svgEl('text', { 'class': 'yc-tick-label', x: m.l - 8, y: (y + 4).toFixed(1), 'text-anchor': 'end' });
-    lbl.textContent = fmtNum(v) + '%';
-    svg.appendChild(lbl);
-  }
-
-  // area + line
-  const linePts = pts.map((p) => [xAt(p.t), yAt(p.r.value)]);
-  const lineD = 'M' + linePts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' L');
-  const areaD = lineD
-    + ' L' + linePts[linePts.length - 1][0].toFixed(1) + ',' + (m.t + ph).toFixed(1)
-    + ' L' + linePts[0][0].toFixed(1) + ',' + (m.t + ph).toFixed(1) + ' Z';
-  svg.appendChild(svgEl('path', { 'class': 'yc-area', d: areaD }));
-  const lineEl = svgEl('path', { 'class': 'yc-line', d: lineD, 'stroke-dasharray': Math.ceil(polyLen(linePts)) });
-  lineEl.style.setProperty('--spark-len', String(Math.ceil(polyLen(linePts))));
-  svg.appendChild(lineEl);
-
-  // x labels + interactive points
-  pts.forEach((p, i) => {
-    const x = xAt(p.t), y = yAt(p.r.value);
-    const xl = svgEl('text', { 'class': 'yc-tick-label', x: x.toFixed(1), y: (H - m.b + 20).toFixed(1), 'text-anchor': 'middle' });
-    xl.textContent = tenorLabel(p.t);
-    svg.appendChild(xl);
-
-    const dot = svgEl('circle', {
-      'class': 'yc-dot', cx: x.toFixed(1), cy: y.toFixed(1), r: 4,
-      tabindex: '0', role: 'img',
-      'aria-label': p.r.name + ': ' + fmtNum(p.r.value) + '%'
-    });
-    const showTip = () => {
-      if (!tip) return;
-      tip.textContent = '';
-      const b = el('b', null, tenorLabel(p.t) + ' · ');
-      tip.appendChild(b);
-      tip.appendChild(document.createTextNode(fmtNum(p.r.value) + '%'));
-      tip.style.setProperty('left', ((x / W) * 100) + '%');
-      tip.style.setProperty('top', ((y / H) * 100) + '%');
-      tip.classList.add('show');
-    };
-    const hideTip = () => { if (tip) tip.classList.remove('show'); };
-    dot.addEventListener('mouseenter', showTip);
-    dot.addEventListener('mouseleave', hideTip);
-    dot.addEventListener('focus', showTip);
-    dot.addEventListener('blur', hideTip);
-    svg.appendChild(dot);
-  });
-
-  host.appendChild(svg);
-}
-
-function ratesGroup(label, rates) {
-  const group = el('div', 'rates-group');
-  if (label) group.appendChild(el('div', 'kpi-group-label', label));
-  const strip = el('div', 'rates-strip');
-  rates.forEach((r) => strip.appendChild(rateChip(r)));
-  group.appendChild(strip);
-  return group;
-}
-
-/**
- * Central-bank decisions group for the rates section. Reuses the .cbev/.cbev-grid
- * card markup (via cbEventCard) inside a labelled .rates-group. The grid carries
- * [data-viz] so the shared IntersectionObserver runs its count-up on scroll-in.
- */
-function cbDecisionsGroup(events) {
-  const group = el('div', 'rates-group');
-  group.appendChild(el('div', 'kpi-group-label', 'Banche centrali · Decisioni sui tassi'));
-  const grid = el('div', 'cbev-grid');
-  grid.setAttribute('data-viz', '');
-  events.forEach((ev) => grid.appendChild(cbEventCard(ev)));
-  group.appendChild(grid);
-  return group;
-}
-
-function renderRates(snapshot) {
-  const host = document.getElementById('ratesStrip');
-  host.textContent = '';
-  const rates = Array.isArray(snapshot.rates) ? snapshot.rates : [];
-  renderYieldCurve(rates);
-
-  // Central-bank policy rates are shown as decision cards from snapshot.cb_events;
-  // the plain BIS rate chips are dropped from the Treasury/reference group to avoid
-  // duplicating the same central banks.
-  const isCentralBank = (r) => String(r.source || '').toUpperCase() === 'BIS';
-  const other = rates.filter((r) => !isCentralBank(r));
-  const cbEvents = Array.isArray(snapshot.cb_events) ? snapshot.cb_events : [];
-
-  if (cbEvents.length) {
-    host.classList.add('rates-grouped');
-    if (other.length) host.appendChild(ratesGroup('Treasury & riferimento', other));
-    host.appendChild(cbDecisionsGroup(cbEvents));
-  } else if (other.length) {
-    // No central-bank decisions: just the Treasury/reference chips, flat.
-    host.classList.remove('rates-grouped');
-    other.forEach((r) => host.appendChild(rateChip(r)));
-  } else {
-    // Nothing but (possibly) BIS rates: fall back to showing everything flat.
-    host.classList.remove('rates-grouped');
-    rates.forEach((r) => host.appendChild(rateChip(r)));
-  }
-}
-
-/* ---------- movers ---------- */
-
-function moverRow(item, maxAbs) {
-  const row = el('div', 'mv-row');
-  row.appendChild(el('span', 'mv-tk', item.ticker));
-  row.appendChild(el('span', 'mv-nm', item.name));
-  const s = el('span', 'mv-sec muted', item.sector || '');
-  row.appendChild(s);
-  row.appendChild(el('span', 'mv-ret ' + signClass(item.ret_1d), fmtPct(item.ret_1d)));
-
-  // Magnitude mini-bar spanning the row (width proportional to |ret_1d|).
-  if (Number.isFinite(item.ret_1d)) {
-    const W = 100, H = 6;
-    const frac = maxAbs > 0 ? Math.min(1, Math.abs(item.ret_1d) / maxAbs) : 0;
-    const w = Math.max(frac * W, 0.6);
-    const svg = svgEl('svg', {
-      'class': 'mv-bar-svg', viewBox: '0 0 ' + W + ' ' + H,
-      preserveAspectRatio: 'none', 'aria-hidden': 'true'
-    });
-    svg.appendChild(svgEl('rect', {
-      'class': 'bar pos ' + signClass(item.ret_1d),
-      x: 0, y: 1, width: w.toFixed(1), height: H - 2, rx: 2
-    }));
-    const barWrap = el('div', 'mv-bar');
-    barWrap.appendChild(svg);
-    row.appendChild(barWrap);
-  }
-  return row;
-}
-
-function renderMovers(snapshot) {
-  const movers = snapshot.movers || {};
-  const g = document.getElementById('moversGainers');
-  const l = document.getElementById('moversLosers');
-  g.textContent = '';
-  l.textContent = '';
-  const gainers = movers.gainers || [];
-  const losers = movers.losers || [];
-  const maxAbs = Math.max.apply(null,
-    gainers.concat(losers).map((it) => Math.abs(it.ret_1d) || 0).concat(0.01));
-  gainers.forEach((it) => g.appendChild(moverRow(it, maxAbs)));
-  losers.forEach((it) => l.appendChild(moverRow(it, maxAbs)));
-  g.setAttribute('data-viz', '');
-  l.setAttribute('data-viz', '');
-}
-
-/* ---------- central-bank decisions (cb_events) ---------- */
-
-/**
- * Build one central-bank decision card (.cbev). Used inside the rates section
- * (via cbDecisionsGroup) — bank name, policy rate, a colour-coded decision chip
- * (Rialzo/Taglio/Invariato) and the effective date when present.
- */
-function cbEventCard(ev) {
-  const card = el('div', 'cbev glass');
-  card.appendChild(el('div', 'cbev-bank', ev.bank));
-
-  const hasRate = typeof ev.rate === 'number' && Number.isFinite(ev.rate);
-  const rateWrap = el('div', 'cbev-rate');
-  const rateVal = el('span', 'cbev-rate-val', hasRate ? fmtNum(ev.rate) + '%' : '—');
-  if (hasRate) markCountUp(rateVal, ev.rate, 'pctval');
-  rateWrap.appendChild(rateVal);
-  card.appendChild(rateWrap);
-
-  const bp = Math.abs(Number.isFinite(ev.change_bp) ? ev.change_bp : 0);
-  let chipText;
-  if (ev.direction === 'hike') chipText = 'Rialzo +' + bp + 'bp';
-  else if (ev.direction === 'cut') chipText = 'Taglio −' + bp + 'bp';
-  else chipText = 'Invariato';
-  card.appendChild(el('div', 'cbev-chip ' + signClass(ev.change_bp), chipText));
-
-  if (ev.as_of) card.appendChild(el('div', 'cbev-asof muted', 'dal ' + fmtDate(ev.as_of)));
-
-  return card;
-}
-
-/* ---------- upcoming earnings ---------- */
-
-function renderEarnings(snapshot) {
-  const host = document.getElementById('earningsList');
-  const section = document.getElementById('earnings');
-  if (!host) return;
-  host.textContent = '';
-  const items = Array.isArray(snapshot.earnings) ? snapshot.earnings : [];
-  if (!items.length) { if (section) section.hidden = true; return; }
-  if (section) section.hidden = false;
-
-  items.forEach((it) => {
-    const row = el('div', 'earn-row');
-    row.appendChild(el('span', 'earn-date', fmtDate(it.date)));
-    row.appendChild(el('span', 'earn-tk', it.ticker));
-    row.appendChild(el('span', 'earn-nm', it.name));
-    row.appendChild(el('span', 'earn-sec muted', it.sector || ''));
-    const eps = (typeof it.eps_estimate === 'number' && Number.isFinite(it.eps_estimate))
-      ? fmtNum(it.eps_estimate) : '—';
-    row.appendChild(el('span', 'earn-eps', 'EPS stim. ' + eps));
-    host.appendChild(row);
-  });
-}
-
-/* ---------- triggers / catalysts ---------- */
-
-function renderTriggers(snapshot) {
-  const host = document.getElementById('triggersList');
-  const section = document.getElementById('triggers');
-  if (!host) return;
-  host.textContent = '';
-  // Show at most the first 5 catalysts.
-  const items = (Array.isArray(snapshot.triggers) ? snapshot.triggers : []).slice(0, 5);
-  if (!items.length) { if (section) section.hidden = true; return; }
-  if (section) section.hidden = false;
-
-  const SOURCE_LABEL = { federal_register: 'Federal Register', sec_edgar: 'SEC EDGAR' };
-
-  items.forEach((it) => {
-    const row = el('div', 'trig-row glass');
-    const head = el('div', 'trig-head');
-    const isSec = it.kind === 'sec_8k';
-    head.appendChild(el('span', 'trig-badge ' + (isSec ? 'sec' : 'eo'), isSec ? '8-K' : 'EO'));
-    head.appendChild(el('span', 'trig-date muted', fmtDate(it.date)));
-    row.appendChild(head);
-
-    const titleWrap = el('div', 'trig-title');
-    titleWrap.appendChild(makeSafeLink(it.title, it.url));
-    row.appendChild(titleWrap);
-
-    const metaText = it.ticker || SOURCE_LABEL[it.source] || it.source || '';
-    if (metaText) row.appendChild(el('div', 'trig-meta muted', metaText));
-
-    host.appendChild(row);
-  });
-}
-
-/* ---------- headlines ---------- */
-
-function renderHeadlines(snapshot) {
-  const host = document.getElementById('headlines');
-  host.textContent = '';
-  (Array.isArray(snapshot.headlines) ? snapshot.headlines : []).forEach((h) => {
-    const item = el('div', 'hl glass');
-    const head = el('div', 'hl-head');
-    head.appendChild(el('span', 'hl-topic', h.topic));
-    head.appendChild(el('span', 'hl-when muted', fmtSeendate(h.seendate)));
-    item.appendChild(head);
-    const titleWrap = el('div', 'hl-title');
-    titleWrap.appendChild(makeSafeLink(h.title, h.url));
-    item.appendChild(titleWrap);
-    item.appendChild(el('div', 'hl-domain muted', h.domain));
-    host.appendChild(item);
-  });
-}
-
-/* ---------- brief (sanitised markdown) ---------- */
-
-function renderBrief(snapshot) {
-  const brief = snapshot.brief || {};
-  document.getElementById('briefWhen').textContent =
-    'Sintesi generata con AI' + (brief.created_at ? ' · ' + fmtDateTime(brief.created_at) : '');
-
-  const container = document.getElementById('briefBody');
-  const md = typeof brief.markdown === 'string' ? brief.markdown : '';
-  const rawHtml = window.marked.parse(md);
-  const clean = window.DOMPurify.sanitize(rawHtml, {
-    ALLOWED_TAGS: ['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'li', 'strong', 'em', 'blockquote', 'code', 'pre', 'a', 'br'],
-    ALLOWED_ATTR: ['href', 'title'],
-    ALLOW_DATA_ATTR: false,
-    ALLOW_ARIA_ATTR: false
-  });
-  // Only place innerHTML is used, and only on sanitised output.
-  container.innerHTML = clean;
-  // Harden any links the brief produced.
-  container.querySelectorAll('a').forEach(setSafeExternalLink);
-  // Cosmetic post-processing of the already-sanitised DOM (classes + icons only).
-  enhanceBrief(container);
-}
-
-/**
- * Enrich the sanitised brief DOM. STRICTLY class additions and prepended
- * textContent icon spans — no new innerHTML, so the security posture is intact.
- */
-function enhanceBrief(container) {
+function enhanceBrief(node) {
   try {
-    // 1. Leading regime paragraph -> coloured pill banner. The regime line is a
-    //    bold sentence: detect it by keyword OR by being (almost) fully bold.
-    const first = container.firstElementChild;
+    const h1 = node.firstElementChild;
+    if (h1 && h1.tagName === 'H1' && /brief/i.test(h1.textContent || '')) h1.remove();
+    const first = node.firstElementChild;
     if (first && first.tagName === 'P') {
       const t = (first.textContent || '').trim();
       const strong = first.querySelector('strong');
@@ -1028,22 +217,7 @@ function enhanceBrief(container) {
         first.classList.add('brief-regime', 'brief-regime-' + sign);
       }
     }
-
-    // 2. Headings -> class + a leading emoji icon chosen by heading text (IT + EN).
-    container.querySelectorAll('h1, h2, h3').forEach((h) => {
-      h.classList.add('brief-h');
-      const t = (h.textContent || '').toLowerCase();
-      let icon = '•';
-      if (t.indexOf('sintesi') !== -1 || t.indexOf('tl;dr') !== -1 || t.indexOf('tldr') !== -1) icon = '📌';
-      else if (t.indexOf('occhio') !== -1 || t.indexOf('watch') !== -1 || t.indexOf('osserv') !== -1) icon = '👁';
-      else if (t.indexOf('settor') !== -1 || t.indexOf('sector') !== -1) icon = '🏭';
-      else if (t.indexOf('tass') !== -1 || t.indexOf('rate') !== -1 || t.indexOf('central') !== -1) icon = '📈';
-      h.insertBefore(el('span', 'brief-ic', icon), h.firstChild);
-    });
-
-    // 3. "Breve termine" / "Lungo termine" strong labels -> two accent blocks
-    //    (+ their following list). English Short-/Long-term kept as a fallback.
-    container.querySelectorAll('strong').forEach((s) => {
+    node.querySelectorAll('strong').forEach((s) => {
       const t = (s.textContent || '').toLowerCase().trim();
       let kind = null;
       if (/^breve\s*termine|^short[- ]?term/.test(t)) kind = 'short';
@@ -1053,638 +227,632 @@ function enhanceBrief(container) {
       if (!block) return;
       block.classList.add('brief-' + kind);
       const next = block.nextElementSibling;
-      if (next && (next.tagName === 'UL' || next.tagName === 'OL')) {
-        next.classList.add('brief-' + kind, 'brief-' + kind + '-list');
-      }
+      if (next && (next.tagName === 'UL' || next.tagName === 'OL')) next.classList.add('brief-' + kind);
     });
-  } catch (_e) { /* enhancement is cosmetic; never block the brief */ }
+  } catch (_e) { /* cosmetic only */ }
 }
 
-/* ---------- footer attribution (verbatim, from data) ---------- */
+/* ---------- markets (tabs + tiles) ---------- */
+
+let ccyMode = 'local';
+let sortMode = 'default';
+const tiles = [];            // { node, item }
+const panels = [];           // { id, groups: [{ grid, tiles:[node], items:[item] }] }
+let activeTab = null;
+
+/* Index LEVELS are points, not prices: converting them to EUR (KOSPI "4,47 EUR")
+ * means nothing, so the currency toggle applies to tradable quotes only. */
+function tileValue(item, kind) {
+  const eur = ccyMode === 'eur' && kind !== 'Indice' && item.currency !== 'EUR' && isNum(item.eur);
+  return { last: eur ? item.eur : item.last, ccy: eur ? 'EUR' : (item.currency || '') };
+}
+
+function paintTile(t) {
+  const v = tileValue(t.item, t.kind);
+  t.last.textContent = fmtPrice(v.last);
+  t.ccy.textContent = v.ccy;
+  t.node.setAttribute('aria-label', (t.item.name || t.item.ticker) + ', ' + fmtPrice(v.last) + ' ' + v.ccy +
+    ', ' + fmtPct(t.item.ret_1d) + ' oggi. Apri il dettaglio');
+}
+
+function tile(item, kind, listFn) {
+  const b = el('button', 'tile');
+  b.type = 'button';
+  b.setAttribute('data-tk', item.ticker);
+  const top = el('span', 't-top');
+  top.appendChild(el('span', 't-name', item.name || item.ticker));
+  top.appendChild(el('span', 'tk', item.ticker));
+  b.appendChild(top);
+  const px = el('span', 't-px');
+  const last = el('span', 't-last num');
+  const ccy = el('span', 't-ccy');
+  px.appendChild(last);
+  px.appendChild(ccy);
+  b.appendChild(px);
+  const chg = el('span', 't-chg');
+  chg.appendChild(pctChip(item.ret_1d));
+  chg.appendChild(el('span', 't-5d', '5g ' + fmtPct(item.ret_5d)));
+  b.appendChild(chg);
+  const sp = sparkline(item.spark, { w: 160, h: 34 });
+  if (sp) {
+    const holder = el('span', 't-spark');
+    holder.appendChild(sp);
+    b.appendChild(holder);
+  }
+  const t = { node: b, item: item, kind: kind, last: last, ccy: ccy };
+  paintTile(t);
+  tiles.push(t);
+  b.addEventListener('click', () => openInstrument(item.ticker, listFn()));
+  return b;
+}
+
+function sortedItems(items) {
+  if (sortMode === 'default') return items.slice();
+  return items.slice().sort((a, b) => (isNum(b[sortMode]) ? b[sortMode] : -1e9) - (isNum(a[sortMode]) ? a[sortMode] : -1e9));
+}
+
+function renderMarkets(snap) {
+  const tablist = $('ovTabs');
+  const host = $('ovPanels');
+  tablist.textContent = '';
+  host.textContent = '';
+  const defs = TAB_DEFS.filter((t) => arr(snap[t.key]).length);
+  if (!defs.length) { $('mercati').hidden = true; return; }
+
+  const ccySeg = segmented('Valuta', [
+    { value: 'local', label: 'Locale' },
+    { value: 'eur', label: 'EUR', title: 'Prezzi convertiti in euro (non si applica ai livelli degli indici)' }
+  ], ccyMode, (v) => { ccyMode = v; tiles.forEach(paintTile); });
+  const btns = [];
+  defs.forEach((t, i) => {
+    const btn = el('button', 'tab');
+    btn.type = 'button';
+    btn.id = 'tab-' + t.id;
+    btn.setAttribute('role', 'tab');
+    btn.setAttribute('aria-controls', 'panel-' + t.id);
+    btn.setAttribute('aria-selected', i === 0 ? 'true' : 'false');
+    btn.tabIndex = i === 0 ? 0 : -1;
+    btn.appendChild(el('span', null, t.label));
+    btn.appendChild(el('span', 'tab-n', String(arr(snap[t.key]).length)));
+    tablist.appendChild(btn);
+    btns.push(btn);
+
+    const panel = el('div', 'panel-grid');
+    panel.id = 'panel-' + t.id;
+    panel.setAttribute('role', 'tabpanel');
+    panel.setAttribute('aria-labelledby', btn.id);
+    panel.hidden = i !== 0;
+
+    const items = arr(snap[t.key]);
+    const groups = [];
+    const buckets = t.id === 'indici'
+      ? REGION_ORDER.map((r) => [r, items.filter((it) => (REGION_BY_TICKER[it.ticker] || 'Altri') === r)])
+      : [[null, items]];
+    const rec = { id: t.id, label: t.label, groups: groups, panel: panel };
+    buckets.forEach(([label, list]) => {
+      if (!list.length) return;
+      if (label) panel.appendChild(el('div', 'grp-l', label));
+      const grid = el('div', 'tiles');
+      const g = { grid: grid, items: list, nodes: new Map() };
+      list.forEach((it) => {
+        const n = tile(it, t.kind, () => visibleTickers(rec));
+        g.nodes.set(it, n);
+        grid.appendChild(n);
+      });
+      groups.push(g);
+      panel.appendChild(grid);
+    });
+    panels.push(rec);
+    host.appendChild(panel);
+  });
+  activeTab = panels[0];
+
+  const select = (idx, focus) => {
+    btns.forEach((b, k) => {
+      const on = k === idx;
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+      b.tabIndex = on ? 0 : -1;
+      panels[k].panel.hidden = !on;
+    });
+    activeTab = panels[idx];
+    ccySeg.node.hidden = activeTab.id === 'indici';
+    if (focus) btns[idx].focus();
+  };
+  btns.forEach((b, i) => {
+    b.addEventListener('click', () => select(i, false));
+    b.addEventListener('keydown', (e) => {
+      let ni = null;
+      if (e.key === 'ArrowRight') ni = (i + 1) % btns.length;
+      else if (e.key === 'ArrowLeft') ni = (i - 1 + btns.length) % btns.length;
+      else if (e.key === 'Home') ni = 0;
+      else if (e.key === 'End') ni = btns.length - 1;
+      if (ni != null) { e.preventDefault(); select(ni, true); }
+    });
+  });
+
+  const tools = $('mktTools');
+  tools.textContent = '';
+  tools.appendChild(segmented('Ordina per', [
+    { value: 'default', label: 'Default' },
+    { value: 'ret_1d', label: '1g', title: 'Ordina per variazione di oggi' },
+    { value: 'ret_5d', label: '5g', title: 'Ordina per variazione a 5 giorni' }
+  ], sortMode, (v) => { sortMode = v; applySort(); }).node);
+  tools.appendChild(ccySeg.node);
+  ccySeg.node.hidden = activeTab.id === 'indici';
+}
+
+function visibleTickers(rec) {
+  const out = [];
+  rec.groups.forEach((g) => sortedItems(g.items).forEach((it) => out.push(it.ticker)));
+  return out;
+}
+
+function applySort() {
+  panels.forEach((p) => p.groups.forEach((g) => {
+    const order = sortedItems(g.items).map((it) => g.nodes.get(it));
+    if (p.panel.hidden) order.forEach((n) => g.grid.appendChild(n));
+    else flipReorder(g.grid, order);
+  }));
+}
+
+/* ---------- movers ---------- */
+
+function renderMovers(snap) {
+  const mv = snap.movers || {};
+  const gainers = arr(mv.gainers), losers = arr(mv.losers);
+  if (!gainers.length && !losers.length) { $('movimenti').hidden = true; return; }
+  const maxAbs = Math.max.apply(null, gainers.concat(losers).map((it) => Math.abs(it.ret_1d) || 0).concat(0.01));
+  const all = gainers.concat(losers).map((it) => it.ticker);
+  const fill = (host, list) => {
+    host.textContent = '';
+    list.forEach((it, i) => {
+      const r = el('button', 'mrow');
+      r.type = 'button';
+      r.setAttribute('data-tk', it.ticker);
+      r.appendChild(el('span', 'mrow-i num', String(i + 1)));
+      r.appendChild(el('span', 'tk', it.ticker));
+      const n = el('span', 'mrow-n');
+      n.appendChild(el('span', 'mrow-name', it.name || ''));
+      if (it.sector) n.appendChild(el('span', 'mrow-sec', it.sector));
+      r.appendChild(n);
+      const bar = el('span', 'mrow-b');
+      bar.appendChild(magnitudeBar(it.ret_1d, maxAbs));
+      r.appendChild(bar);
+      r.appendChild(el('span', 'mrow-p num', fmtPrice(it.last)));
+      r.appendChild(pctChip(it.ret_1d));
+      r.addEventListener('click', () => openInstrument(it.ticker, all));
+      host.appendChild(r);
+    });
+  };
+  fill($('moversUp'), gainers);
+  fill($('moversDown'), losers);
+}
+
+/* ---------- sectors (heatmap) ---------- */
+
+let sectorPeriod = 'avg_ret_1d';
+
+function renderSectors(snap) {
+  const list = arr(snap.sectors);
+  const host = $('heatmap');
+  host.textContent = '';
+  if (!list.length) { $('settori').hidden = true; return; }
+
+  const cons = [];
+  list.forEach((s) => arr(s.constituents).forEach((c) => cons.push(c)));
+  const up = cons.filter((c) => isNum(c.ret_1d) && c.ret_1d > 0).length;
+  const upSec = list.filter((s) => isNum(s.avg_ret_1d) && s.avg_ret_1d > 0).length;
+  $('breadth').textContent = upSec + '/' + list.length + ' settori e ' + up + '/' + cons.length + ' titoli in rialzo oggi';
+
+  const nodes = new Map();
+  list.forEach((s) => {
+    const t = el('button', 'hm');
+    t.type = 'button';
+    t.appendChild(el('span', 'hm-l', s.label));
+    const big = el('span', 'hm-v num');
+    const small = el('span', 'hm-s num');
+    t.appendChild(big);
+    t.appendChild(small);
+    const ranked = arr(s.constituents).filter((c) => isNum(c.ret_1d)).slice().sort((a, b) => b.ret_1d - a.ret_1d);
+    if (ranked.length) {
+      const ex = el('span', 'hm-x');
+      const best = ranked[0], worst = ranked[ranked.length - 1];
+      const a = el('span');
+      a.appendChild(el('span', 'tk', best.ticker));
+      a.appendChild(el('span', 'chg ' + signClass(best.ret_1d), fmtPct(best.ret_1d)));
+      ex.appendChild(a);
+      if (worst !== best) {
+        const z = el('span');
+        z.appendChild(el('span', 'tk', worst.ticker));
+        z.appendChild(el('span', 'chg ' + signClass(worst.ret_1d), fmtPct(worst.ret_1d)));
+        ex.appendChild(z);
+      }
+      t.appendChild(ex);
+    }
+    t.addEventListener('click', () => openSector(s.key));
+    nodes.set(s, { t: t, big: big, small: small });
+    host.appendChild(t);
+  });
+
+  const paint = (animate) => {
+    const key = sectorPeriod, other = key === 'avg_ret_1d' ? 'avg_ret_5d' : 'avg_ret_1d';
+    const maxAbs = Math.max.apply(null, list.map((s) => Math.abs(s[key]) || 0).concat(0.25));
+    list.forEach((s) => {
+      const n = nodes.get(s);
+      const v = s[key];
+      n.big.textContent = fmtPct(v);
+      n.small.textContent = (key === 'avg_ret_1d' ? '5g ' : '1g ') + fmtPct(s[other]);
+      n.t.classList.remove('up', 'down', 'flat');
+      n.t.classList.add(signClass(v));
+      n.t.style.setProperty('--a', isNum(v) ? String(Math.min(1, Math.abs(v) / maxAbs)) : '0');
+      n.t.setAttribute('aria-label', s.label + ' ' + fmtPct(v) + (key === 'avg_ret_1d' ? ' oggi' : ' a 5 giorni') + '. Apri il dettaglio');
+    });
+    const order = list.slice().sort((a, b) => (isNum(b[key]) ? b[key] : -1e9) - (isNum(a[key]) ? a[key] : -1e9))
+      .map((s) => nodes.get(s).t);
+    if (animate) flipReorder(host, order); else order.forEach((n) => host.appendChild(n));
+  };
+  paint(false);
+  const tools = $('secTools');
+  tools.textContent = '';
+  tools.appendChild(segmented('Periodo', [
+    { value: 'avg_ret_1d', label: '1g' }, { value: 'avg_ret_5d', label: '5g' }
+  ], sectorPeriod, (v) => { sectorPeriod = v; paint(true); }).node);
+}
+
+/* ---------- rates ---------- */
+
+function tenorYears(seriesId) {
+  const m = /UST\s*(\d+(?:\.\d+)?)\s*(M|Y)/i.exec(seriesId || '');
+  if (!m) return null;
+  const n = parseFloat(m[1]);
+  return m[2].toUpperCase() === 'M' ? n / 12 : n;
+}
+function tenorLabel(y) {
+  return y < 1 ? Math.round(y * 12) + 'M' : (Number.isInteger(y) ? y : y.toFixed(1)) + 'A';
+}
+
+function spreadChip(label, a, b) {
+  if (!a || !b) return null;
+  const s = b.value - a.value;
+  const d = isNum(a.chg) && isNum(b.chg) ? b.chg - a.chg : null;
+  const c = el('div', 'spread');
+  c.appendChild(el('span', 'spread-l', label));
+  c.appendChild(el('span', 'spread-v num ' + (s < 0 ? 'down' : ''), fmtBp(s)));
+  if (d != null) c.appendChild(el('span', 'spread-d chg ' + signClass(d), '1g ' + fmtBp(d)));
+  c.title = s < 0 ? 'Tratto invertito' : 'Tratto positivo';
+  return c;
+}
+
+function renderRates(snap) {
+  const rates = arr(snap.rates);
+  const cb = arr(snap.cb_events);
+  if (!rates.length && !cb.length) { $('tassi').hidden = true; return; }
+
+  const curvePts = rates
+    .map((r) => ({ r: r, t: tenorYears(r.series_id) }))
+    .filter((p) => p.t != null && isNum(p.r.value))
+    .sort((a, b) => a.t - b.t)
+    .map((p) => ({ t: p.t, label: tenorLabel(p.t), value: p.r.value, chg: p.r.chg, name: p.r.name }));
+  const curveBox = $('curve');
+  curveBox.textContent = '';
+  let showPrev = false;
+  let chart = yieldCurveChart(curvePts, curveBox.clientWidth);
+  if (chart) {
+    curveBox.appendChild(chart.node);
+    onWidthChange(curveBox, (w) => {
+      chart = yieldCurveChart(curvePts, w);
+      chart.setPrev(showPrev);
+      curveBox.textContent = '';
+      curveBox.appendChild(chart.node);
+    });
+    const tools = $('curveTools');
+    tools.textContent = '';
+    if (chart.hasPrev) {
+      tools.appendChild(segmented('Confronto', [
+        { value: 'off', label: 'Oggi' }, { value: 'on', label: '+ ieri', title: 'Sovrapponi la curva della seduta precedente' }
+      ], 'off', (v) => { showPrev = v === 'on'; chart.setPrev(showPrev); }).node);
+    }
+    const by = new Map(curvePts.map((p) => [p.label, p]));
+    const spreads = $('spreads');
+    spreads.textContent = '';
+    [['2A–10A', '2A', '10A'], ['5A–30A', '5A', '30A'], ['3M–10A', '3M', '10A']].forEach(([l, a, b]) => {
+      const c = spreadChip(l, by.get(a), by.get(b));
+      if (c) spreads.appendChild(c);
+    });
+    const first = curvePts[0], last = curvePts[curvePts.length - 1];
+    $('curveShape').textContent = last.value >= first.value ? 'Curva positiva' : 'Curva invertita';
+  } else {
+    $('curvePanel').hidden = true;
+  }
+
+  const tbl = $('ratesTable');
+  tbl.textContent = '';
+  const SHORT = { EFFR: 'Fed Funds effettivo', SOFR: 'SOFR' };
+  rates.filter((r) => String(r.source || '').toUpperCase() !== 'BIS')
+    .map((r) => ({ r: r, t: tenorYears(r.series_id) }))
+    .sort((a, b) => (a.t == null ? 1e3 : a.t) - (b.t == null ? 1e3 : b.t))
+    .forEach(({ r, t }) => {
+    const row = el('div', 'rt');
+    const name = el('span', 'rt-n', t != null ? 'Treasury ' + tenorLabel(t) : (SHORT[r.series_id] || r.name || r.series_id));
+    name.title = r.name || r.series_id;
+    row.appendChild(name);
+    row.appendChild(el('span', 'rt-v num', fmtRate(r.value)));
+    row.appendChild(el('span', 'chg ' + signClass(r.chg), fmtBp(r.chg)));
+    row.appendChild(el('span', 'rt-d', (r.source ? r.source + ' · ' : '') + fmtDate(r.as_of)));
+    tbl.appendChild(row);
+    });
+
+  const cbl = $('cbList');
+  cbl.textContent = '';
+  if (!cb.length) $('cbPanel').hidden = true;
+  cb.forEach((ev) => {
+    const row = el('div', 'rt');
+    row.appendChild(el('span', 'rt-n rt-bank', ev.bank));
+    row.appendChild(el('span', 'rt-v num', fmtRate(ev.rate)));
+    const bp = Math.abs(isNum(ev.change_bp) ? ev.change_bp : 0);
+    let chip = 'Invariato', cls = 'flat';
+    if (ev.direction === 'hike') { chip = 'Rialzo +' + bp + ' bp'; cls = 'up'; }
+    else if (ev.direction === 'cut') { chip = 'Taglio −' + bp + ' bp'; cls = 'down'; }
+    row.appendChild(el('span', 'move ' + cls, chip));
+    row.appendChild(el('span', 'rt-d', ev.as_of ? 'dal ' + fmtDate(ev.as_of) : ''));
+    cbl.appendChild(row);
+  });
+}
+
+/* ---------- agenda: earnings + catalysts ---------- */
+
+/* Form 8-K item codes (EDGAR `items`, carried in trigger.topic). 9.01 is the
+ * exhibits index that accompanies almost every filing, so it is only shown
+ * when it is the sole item. */
+const ITEMS_8K = {
+  '1.01': 'Accordo rilevante', '1.02': 'Fine di un accordo rilevante', '1.03': 'Procedura concorsuale',
+  '1.05': 'Incidente di cybersicurezza', '2.01': 'Acquisizione o cessione', '2.02': 'Risultati finanziari',
+  '2.03': 'Nuovo debito', '2.04': 'Obbligazione accelerata', '2.05': 'Costi di ristrutturazione',
+  '2.06': 'Svalutazione rilevante', '3.01': 'Requisiti di quotazione', '3.02': 'Emissione di azioni non registrata',
+  '3.03': 'Modifica dei diritti degli azionisti', '4.01': 'Cambio del revisore', '4.02': 'Bilanci non più affidabili',
+  '5.01': 'Cambio di controllo', '5.02': 'Cambi al vertice', '5.03': 'Modifiche a statuto',
+  '5.07': 'Voto degli azionisti', '7.01': 'Comunicazione Reg FD', '8.01': 'Altri eventi', '9.01': 'Bilanci e allegati'
+};
+function items8k(topic) {
+  const codes = String(topic || '').split(',').map((c) => c.trim()).filter(Boolean);
+  const main = codes.filter((c) => c !== '9.01');
+  return (main.length ? main : codes).map((c) => ITEMS_8K[c] || ('Voce ' + c));
+}
+
+function chipFilter(host, options, onChange) {
+  host.textContent = '';
+  let cur = options[0] && options[0].value;
+  const btns = options.map((o) => {
+    const b = el('button', 'fchip');
+    b.type = 'button';
+    b.appendChild(el('span', null, o.label));
+    if (o.count != null) b.appendChild(el('span', 'fchip-n', String(o.count)));
+    b.setAttribute('aria-pressed', o.value === cur ? 'true' : 'false');
+    b.addEventListener('click', () => {
+      cur = o.value;
+      btns.forEach((x, i) => x.setAttribute('aria-pressed', options[i].value === cur ? 'true' : 'false'));
+      onChange(cur);
+    });
+    host.appendChild(b);
+    return b;
+  });
+}
+
+function renderAgenda(snap) {
+  const earn = arr(snap.earnings).slice().sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const trig = arr(snap.triggers);
+  if (!earn.length && !trig.length) { $('agenda').hidden = true; return; }
+
+  // earnings, filterable by day
+  const eList = $('earnList');
+  let eDay = null, eAll = false;
+  const paintEarn = (day) => {
+    if (day !== undefined) { eDay = day; eAll = false; }
+    eList.textContent = '';
+    const tickers = earn.map((e) => e.ticker).filter((t) => instruments.has(t));
+    let lastDay = null;
+    const rows = earn.filter((e) => !eDay || e.date === eDay);
+    rows.slice(0, eAll ? rows.length : 8).forEach((e) => {
+      if (e.date !== lastDay) {
+        eList.appendChild(el('div', 'day-h', fmtDay(e.date)));
+        lastDay = e.date;
+      }
+      const known = instruments.has(e.ticker);
+      const row = el(known ? 'button' : 'div', 'erow' + (known ? ' link' : ''));
+      if (known) {
+        row.type = 'button';
+        row.setAttribute('data-tk', e.ticker);
+        row.addEventListener('click', () => openInstrument(e.ticker, tickers));
+      }
+      row.appendChild(el('span', 'tk', e.ticker));
+      row.appendChild(el('span', 'erow-n', e.name || ''));
+      row.appendChild(el('span', 'erow-s', e.sector || ''));
+      row.appendChild(el('span', 'erow-e num', isNum(e.eps_estimate) ? 'EPS ' + fmtNum(e.eps_estimate, 2) : 'EPS —'));
+      eList.appendChild(row);
+    });
+    const more = $('earnMore');
+    more.hidden = rows.length <= 8;
+    more.textContent = eAll ? 'Mostra meno' : 'Mostra tutte (' + rows.length + ')';
+  };
+  if (earn.length) {
+    const days = [];
+    earn.forEach((e) => { if (days.indexOf(e.date) === -1) days.push(e.date); });
+    chipFilter($('earnDays'), [{ value: null, label: 'Tutte', count: earn.length }]
+      .concat(days.slice(0, 8).map((d) => ({ value: d, label: fmtDay(d), count: earn.filter((e) => e.date === d).length }))),
+    paintEarn);
+    $('earnMore').addEventListener('click', () => { eAll = !eAll; paintEarn(); });
+    paintEarn(null);
+  } else {
+    $('earnPanel').hidden = true;
+  }
+
+  // catalysts, filterable by kind, first 6 then "show all"
+  const tList = $('trigList');
+  const KIND = { sec_8k: '8-K', executive_order: 'EO' };
+  let expanded = false;
+  let kind = null;
+  const paintTrig = () => {
+    tList.textContent = '';
+    const rows = trig.filter((t) => !kind || t.kind === kind);
+    rows.slice(0, expanded ? rows.length : 6).forEach((t) => {
+      const row = el('div', 'trow');
+      const isSec = t.kind === 'sec_8k';
+      row.appendChild(el('span', 'badge' + (isSec ? '' : ' eo'), KIND[t.kind] || (isSec ? '8-K' : 'EO')));
+      const mid = el('div', 'trow-m');
+      const labels = isSec ? items8k(t.topic) : [];
+      mid.appendChild(makeSafeLink(labels.length ? t.ticker + ' · ' + labels.join(', ') : t.title, t.url, 'trow-t'));
+      const meta = el('span', 'trow-d');
+      meta.appendChild(document.createTextNode(fmtDate(t.date)));
+      if (t.ticker) {
+        meta.appendChild(document.createTextNode(' · '));
+        if (instruments.has(t.ticker)) {
+          const b = el('button', 'tk tk-link', t.ticker);
+          b.type = 'button';
+          b.addEventListener('click', () => openInstrument(t.ticker));
+          meta.appendChild(b);
+        } else {
+          meta.appendChild(el('span', 'tk', t.ticker));
+        }
+      } else if (t.source === 'federal_register') {
+        meta.appendChild(document.createTextNode(' · Federal Register'));
+      }
+      mid.appendChild(meta);
+      row.appendChild(mid);
+      tList.appendChild(row);
+    });
+    const more = $('trigMore');
+    more.hidden = rows.length <= 6;
+    more.textContent = expanded ? 'Mostra meno' : 'Mostra tutti (' + rows.length + ')';
+  };
+  if (trig.length) {
+    const eo = trig.filter((t) => t.kind !== 'sec_8k').length;
+    chipFilter($('trigKinds'), [
+      { value: null, label: 'Tutti', count: trig.length },
+      { value: 'sec_8k', label: '8-K societari', count: trig.length - eo },
+      { value: 'executive_order', label: 'Ordini esecutivi', count: eo }
+    ].filter((o) => o.count > 0), (v) => { kind = v; expanded = false; paintTrig(); });
+    $('trigMore').addEventListener('click', () => { expanded = !expanded; paintTrig(); });
+    paintTrig();
+  } else {
+    $('trigPanel').hidden = true;
+  }
+}
+
+/* ---------- news ---------- */
+
+function renderNews(snap) {
+  const items = arr(snap.headlines).filter((h) => h && h.title);
+  const list = $('newsList');
+  const health = (snap.meta && snap.meta.source_health && snap.meta.source_health.gdelt) || null;
+  if (health && health.status && health.status !== 'OK') {
+    $('newsNote').textContent = 'Copertura parziale oggi: ' + (health.successful_queries || 0) + ' ricerche su ' +
+      (health.attempted_queries || 0) + ' riuscite (limiti della fonte GDELT).';
+  }
+  if (!items.length) {
+    list.textContent = '';
+    list.appendChild(el('p', 'empty', 'Nessuna notizia economica disponibile per questa edizione.'));
+    return;
+  }
+  const now = new Date();
+  const paint = (topic) => {
+    list.textContent = '';
+    items.filter((h) => !topic || h.topic === topic).forEach((h) => {
+      const row = el('article', 'nrow');
+      const d = parseSeendate(h.seendate);
+      const time = el('time', 'nrow-t', d ? relTime(d, now) : '');
+      if (d) { time.setAttribute('datetime', d.toISOString()); time.title = fmtDateTime(d); }
+      row.appendChild(time);
+      row.appendChild(el('span', 'nrow-k', topicLabel(h.topic)));
+      const mid = el('div', 'nrow-m');
+      mid.appendChild(makeSafeLink(h.title, h.url, 'nrow-h'));
+      mid.appendChild(el('span', 'nrow-s', outlet(h.domain)));
+      row.appendChild(mid);
+      list.appendChild(row);
+    });
+  };
+  const counts = new Map();
+  items.forEach((h) => counts.set(h.topic, (counts.get(h.topic) || 0) + 1));
+  const topics = Array.from(counts.keys()).sort((a, b) => counts.get(b) - counts.get(a));
+  chipFilter($('newsTopics'), [{ value: null, label: 'Tutte', count: items.length }]
+    .concat(topics.map((t) => ({ value: t, label: topicLabel(t), count: counts.get(t) }))), paint);
+  paint(null);
+}
+
+/* ---------- footer ---------- */
 
 function renderFooter(meta) {
   const attr = (meta && meta.attribution) || {};
-  document.getElementById('attrTreasury').textContent = attr.us_treasury || '';
-  document.getElementById('attrNyfed').textContent = attr.ny_fed || '';
-  const bis = document.getElementById('attrBis');
-  if (bis) {
-    bis.textContent = attr.bis || '';
-    bis.hidden = !attr.bis; // hide the block entirely when there's no BIS notice
-  }
+  const host = $('attrib');
+  host.textContent = '';
+  // Verbatim wording; only the files' hard line wraps are reflowed (blank
+  // lines stay paragraph breaks) so the notices read as text, not a ragged column.
+  ['us_treasury', 'ny_fed', 'bis', 'federal_register', 'sec_edgar'].forEach((k) => {
+    if (!attr[k]) return;
+    const box = el('div', 'attr');
+    String(attr[k]).split(/\n\s*\n/).forEach((para) => {
+      box.appendChild(el('p', null, para.replace(/\s*\n\s*/g, ' ').trim()));
+    });
+    host.appendChild(box);
+  });
+}
+
+/* ---------- nav + scrollspy ---------- */
+
+let activeSection = 'mercati';
+
+function wireNav() {
+  const links = [].slice.call(document.querySelectorAll('#nav a'));
+  const secs = links.map((a) => $(a.getAttribute('href').slice(1))).filter((s) => s && !s.hidden);
+  links.forEach((a) => {
+    const s = $(a.getAttribute('href').slice(1));
+    if (!s || s.hidden) a.hidden = true;
+  });
+  const setActive = (id) => {
+    activeSection = id;
+    links.forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + id));
+  };
+  const io = new IntersectionObserver((es) => {
+    es.forEach((e) => { if (e.isIntersecting) setActive(e.target.id); });
+  }, { rootMargin: '-40% 0px -55% 0px' });
+  secs.forEach((s) => io.observe(s));
+}
+
+/* ---------- search palette entries ---------- */
+
+function paletteEntries(snap) {
+  const out = [];
+  const lists = new Map(TAB_DEFS.map((t) => [t.kind, arr(snap[t.key]).map((it) => it.ticker)]));
+  instruments.forEach((rec, tk) => {
+    const s = rec.sector ? sectors.get(rec.sector) : null;
+    out.push({
+      kind: rec.kind, label: rec.item.name || tk, ticker: tk, ret: rec.item.ret_1d,
+      sub: s ? s.label : '',
+      run: () => openInstrument(tk, lists.get(rec.kind) && lists.get(rec.kind).indexOf(tk) !== -1 ? lists.get(rec.kind) : null)
+    });
+  });
+  sectors.forEach((s, key) => out.push({ kind: 'Settore', label: s.label, ret: s.avg_ret_1d, run: () => openSector(key) }));
+  [].slice.call(document.querySelectorAll('#nav a')).forEach((a) => {
+    if (a.hidden) return;
+    const id = a.getAttribute('href').slice(1);
+    out.push({ kind: 'Sezione', label: a.textContent, run: () => $(id).scrollIntoView({ behavior: REDUCE.matches ? 'auto' : 'smooth' }) });
+  });
+  if (briefNode) out.push({ kind: 'Sezione', label: 'Morning Brief', sub: 'nota del giorno', run: openBrief });
+  return out;
 }
 
 /* ---------- error state ---------- */
 
 function showError(title, detail) {
-  const dash = document.getElementById('dashboard');
-  if (dash) dash.hidden = true;
-  const box = document.getElementById('errorState');
-  document.getElementById('errorTitle').textContent = title;
-  document.getElementById('errorDetail').textContent = detail || '';
-  box.hidden = false;
-}
-
-/* ---------- modal wiring (once) ---------- */
-
-function wireModal() {
-  const overlay = document.getElementById('overlay');
-  const wrap = document.getElementById('sheetWrap');
-  const sheet = document.getElementById('sheet');
-  const close = document.getElementById('close');
-  if (close) close.addEventListener('click', closeModal);
-  if (wrap) wrap.addEventListener('click', (e) => { if (e.target === wrap) closeModal(); });
-  if (sheet) sheet.addEventListener('click', (e) => e.stopPropagation());
-  window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay.classList.contains('open')) closeModal(); });
-}
-
-/* ---------- Morning Brief expand/collapse (once) ---------- */
-
-/** Wire the Morning Brief card's toggle: flip `.open` on the card + aria-expanded. */
-function wireBrief() {
-  const card = document.getElementById('briefCard');
-  const btn = document.getElementById('briefToggle');
-  if (!card || !btn) return;
-  btn.addEventListener('click', () => {
-    const open = card.classList.toggle('open');
-    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-  });
-}
-
-/* ---------- reveal-on-scroll + blob parallax (cosmetic) ---------- */
-
-function wireCosmetics() {
-  const io = new IntersectionObserver((es) => {
-    es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
-  }, { threshold: 0.12 });
-  document.querySelectorAll('.reveal').forEach((elm) => io.observe(elm));
-
-  const blobs = [].slice.call(document.querySelectorAll('.blob'));
-  window.addEventListener('pointermove', (e) => {
-    const x = e.clientX / window.innerWidth - 0.5, y = e.clientY / window.innerHeight - 0.5;
-    blobs.forEach((b, i) => {
-      const k = (i + 1) * 14;
-      b.style.marginLeft = (x * k) + 'px';
-      b.style.marginTop = (y * k) + 'px';
-    });
-  });
-}
-
-/* ---------- floating AI chat widget ---------- */
-
-/* Same sanitiser config as renderBrief — the ONLY difference is these are
- * assistant chat replies rather than the Morning Brief. */
-const CHAT_SANITIZE = {
-  ALLOWED_TAGS: ['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'li', 'strong', 'em', 'blockquote', 'code', 'pre', 'a', 'br'],
-  ALLOWED_ATTR: ['href', 'title'],
-  ALLOW_DATA_ATTR: false,
-  ALLOW_ARIA_ATTR: false
-};
-
-// In-memory conversation (user + assistant turns), trimmed to the last ~12.
-const chatHistory = [];
-const CHAT_MAX_TURNS = 12;
-const CHAT_MAX_INPUT = 2000;
-let chatBusy = false;
-/* Live request, so the user can stop a generation instead of waiting it out. */
-let chatAbort = null;
-/* 'auto' lets the server decide from the question; 'on'/'off' force it. */
-let chatWebMode = 'auto';
-const CHAT_WEB_MODES = ['auto', 'on', 'off'];
-const CHAT_WEB_LABEL = { auto: 'Web: auto', on: 'Web: sempre', off: 'Web: mai' };
-
-const CHAT_GREETING =
-  'Ciao! Sono l’**Assistente AI** di ForwardGuidex. ' +
-  'Come posso esserti utile oggi su mercati, indici o tassi?';
-
-/** Trim the running history to the last CHAT_MAX_TURNS entries. */
-function trimChatHistory() {
-  if (chatHistory.length > CHAT_MAX_TURNS) {
-    chatHistory.splice(0, chatHistory.length - CHAT_MAX_TURNS);
-  }
-}
-
-/**
- * Reset the conversation to a fresh state: clear the in-memory history AND the
- * visible log, then show the greeting plus data-derived starter questions.
- */
-function resetChat() {
-  if (chatBusy) return;
-  chatHistory.length = 0;
-  const log = document.getElementById('chatLog');
-  if (log) log.textContent = '';
-  appendChatMessage('assistant', CHAT_GREETING);
-  renderChatSuggestions();
-}
-
-/* ---------- grounding context ---------- */
-
-/**
- * Compact plain-text market summary the client sends as grounding context.
- * Every field is guarded — arrays may be empty or missing.
- *
- * Treated as UNTRUSTED by the server (see functions/api/chat.js): parts of it —
- * news headlines, filing titles — are third-party text, so it is delivered
- * inside a nonce-delimited data block rather than as instructions.
- */
-function buildMarketContext(snapshot) {
-  if (!snapshot || typeof snapshot !== 'object') return '';
-  const parts = [];
-  const meta = snapshot.meta || {};
-  if (meta.data_as_of) parts.push('Dati al ' + fmtDate(meta.data_as_of) + '.');
-
-  /* Data health first: an assistant that quotes a stale or partial snapshot
-   * without saying so is worse than one that admits the gap. */
-  const health = [];
-  if (meta.freshness && meta.freshness !== 'FRESH') health.push('freschezza=' + meta.freshness);
-  if (meta.quality && meta.quality !== 'OK') health.push('qualità=' + meta.quality);
-  if (meta.market_state_at_generation) health.push('fase di mercato=' + meta.market_state_at_generation);
-  if (health.length) {
-    parts.push('ATTENZIONE stato dei dati: ' + health.join(', ') +
-      ' — segnalalo all\'utente prima di commentare i numeri.');
-  }
-
-  /* What the user is actually looking at right now. */
-  const activeTab = document.querySelector('#ovTablist .ov-tab[aria-selected="true"]');
-  if (activeTab && activeTab.textContent) {
-    parts.push('L\'utente sta guardando la scheda "' + activeTab.textContent.trim() + '".');
-  }
-
-  const indices = Array.isArray(snapshot.indices) ? snapshot.indices : [];
-  if (indices.length) {
-    parts.push('Indici (1g): ' + indices.slice(0, 10)
-      .map((i) => (i.name || i.ticker || '?') + ' ' + fmtPct(i.ret_1d)).join(', ') + '.');
-  }
-
-  const sectors = (Array.isArray(snapshot.sectors) ? snapshot.sectors : [])
-    .filter((s) => Number.isFinite(s.avg_ret_1d))
-    .slice().sort((a, b) => b.avg_ret_1d - a.avg_ret_1d);
-  if (sectors.length) {
-    parts.push('Settori (1g): ' + sectors.slice(0, 8)
-      .map((s) => (s.label || s.key || '?') + ' ' + fmtPct(s.avg_ret_1d)).join(', ') + '.');
-  }
-
-  const rates = Array.isArray(snapshot.rates) ? snapshot.rates : [];
-  if (rates.length) {
-    parts.push('Tassi: ' + rates.slice(0, 8)
-      .map((r) => (r.name || r.series_id || '?') + ' ' + fmtNum(r.value) + '%').join(', ') + '.');
-  }
-
-  const crypto = Array.isArray(snapshot.crypto) ? snapshot.crypto : [];
-  if (crypto.length) {
-    parts.push('Crypto (1g): ' + crypto.slice(0, 5)
-      .map((c) => (c.name || c.ticker || '?') + ' ' + fmtPct(c.ret_1d)).join(', ') + '.');
-  }
-
-  const cb = Array.isArray(snapshot.cb_events) ? snapshot.cb_events : [];
-  if (cb.length) {
-    const DIR = { hike: 'rialzo', cut: 'taglio', hold: 'invariato' };
-    parts.push('Banche centrali: ' + cb.slice(0, 6)
-      .map((e) => (e.bank || '?') + ' ' + fmtNum(e.rate) + '% (' + (DIR[e.direction] || e.direction || '—') + ')')
-      .join(', ') + '.');
-  }
-
-  const movers = snapshot.movers || {};
-  const gainers = Array.isArray(movers.gainers) ? movers.gainers : [];
-  const losers = Array.isArray(movers.losers) ? movers.losers : [];
-  if (gainers.length) {
-    parts.push('Top rialzi: ' + gainers.slice(0, 5)
-      .map((m) => (m.name || m.ticker || '?') + ' ' + fmtPct(m.ret_1d)).join(', ') + '.');
-  }
-  if (losers.length) {
-    parts.push('Top ribassi: ' + losers.slice(0, 5)
-      .map((m) => (m.name || m.ticker || '?') + ' ' + fmtPct(m.ret_1d)).join(', ') + '.');
-  }
-
-  const earnings = Array.isArray(snapshot.earnings) ? snapshot.earnings : [];
-  if (earnings.length) {
-    parts.push('Earnings in arrivo: ' + earnings.slice(0, 6)
-      .map((e) => (e.name || e.ticker || '?') + ' (' + fmtDate(e.date) + ')').join(', ') + '.');
-  }
-
-  const triggers = (Array.isArray(snapshot.triggers) ? snapshot.triggers : [])
-    .map((t) => t && t.title).filter(Boolean);
-  if (triggers.length) {
-    parts.push('Catalizzatori: ' + triggers.slice(0, 5).join('; ') + '.');
-  }
-
-  /* Headlines the dashboard is showing, so "di cosa parla questa notizia?"
-   * works without a web search. Third-party text — see the note above. */
-  const news = (Array.isArray(snapshot.headlines) ? snapshot.headlines : [])
-    .map((n) => n && n.title && ((n.topic ? '[' + n.topic + '] ' : '') + n.title))
-    .filter(Boolean);
-  if (news.length) {
-    parts.push('Titoli in home: ' + news.slice(0, 8).join(' | ') + '.');
-  }
-
-  let ctx = parts.join('\n');
-  if (ctx.length > 4500) ctx = ctx.slice(0, 4499) + '…';
-  return ctx;
-}
-
-/**
- * Starter questions built from the snapshot actually loaded, so they name real
- * movers and real events instead of being decorative placeholders.
- */
-function buildChatSuggestions(snapshot) {
-  const out = [];
-  if (!snapshot || typeof snapshot !== 'object') return out;
-
-  const movers = snapshot.movers || {};
-  const losers = Array.isArray(movers.losers) ? movers.losers : [];
-  const gainers = Array.isArray(movers.gainers) ? movers.gainers : [];
-  const worst = losers[0] && (losers[0].name || losers[0].ticker);
-  const best = gainers[0] && (gainers[0].name || gainers[0].ticker);
-  if (worst) out.push('Perché ' + worst + ' scende oggi?');
-  if (best && out.length < 2) out.push('Cosa spinge ' + best + '?');
-
-  const cb = Array.isArray(snapshot.cb_events) ? snapshot.cb_events : [];
-  if (cb.length && cb[0].bank) out.push('Cosa implica la mossa della ' + cb[0].bank + '?');
-
-  const earnings = Array.isArray(snapshot.earnings) ? snapshot.earnings : [];
-  const next = earnings[0] && (earnings[0].name || earnings[0].ticker);
-  if (next) out.push('Cosa aspettarsi dagli earnings di ' + next + '?');
-
-  const sectors = (Array.isArray(snapshot.sectors) ? snapshot.sectors : [])
-    .filter((s) => Number.isFinite(s.avg_ret_1d));
-  if (sectors.length > 1) out.push('Che rotazione settoriale vedi oggi?');
-
-  if (!out.length) out.push('Riassumi la giornata sui mercati');
-  return out.slice(0, 4);
-}
-
-/** Render the starter questions as one-click chips under the greeting. */
-function renderChatSuggestions() {
-  const log = document.getElementById('chatLog');
-  if (!log) return;
-  const items = buildChatSuggestions(currentSnapshot);
-  if (!items.length) return;
-  const wrap = el('div', 'chat-chips');
-  items.forEach((q) => {
-    const chip = el('button', 'chat-chip', q);
-    chip.type = 'button';
-    chip.addEventListener('click', () => {
-      if (chatBusy) return;
-      if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
-      sendChat(q);
-    });
-    wrap.appendChild(chip);
-  });
-  log.appendChild(wrap);
-  log.scrollTop = log.scrollHeight;
-}
-
-/* ---------- rendering ---------- */
-
-/** Sanitise markdown into a bubble. innerHTML only ever receives clean output. */
-function renderChatMarkdown(bubble, md) {
-  const clean = window.DOMPurify.sanitize(window.marked.parse(md || ''), CHAT_SANITIZE);
-  bubble.innerHTML = clean; // sanitised output only
-  bubble.querySelectorAll('a').forEach(setSafeExternalLink);
-}
-
-/**
- * Append a message bubble to #chatLog and auto-scroll.
- *   - role 'user'   -> textContent only (never HTML).
- *   - role 'system' -> textContent only, error/system styling.
- *   - role 'assistant' -> markdown via the SAME marked+DOMPurify pattern as
- *     renderBrief; links hardened with setSafeExternalLink.
- */
-function appendChatMessage(role, content) {
-  const log = document.getElementById('chatLog');
-  if (!log) return null;
-  const msg = el('div', 'chat-msg chat-' + role);
-
-  if (role === 'assistant') {
-    const bubble = el('div', 'chat-bubble brief-body');
-    renderChatMarkdown(bubble, typeof content === 'string' ? content : '');
-    msg.appendChild(bubble);
-  } else {
-    // user + system: plain text, never parsed as HTML
-    msg.appendChild(el('div', 'chat-bubble', typeof content === 'string' ? content : String(content)));
-  }
-
-  log.appendChild(msg);
-  log.scrollTop = log.scrollHeight;
-  return msg;
-}
-
-/** Insert the "sto scrivendo…" typing indicator; returns the node to remove. */
-function showChatTyping() {
-  const log = document.getElementById('chatLog');
-  if (!log) return null;
-  const msg = el('div', 'chat-msg chat-assistant');
-  const bubble = el('div', 'chat-bubble chat-typing');
-  bubble.setAttribute('aria-label', 'Sto scrivendo…');
-  for (let i = 0; i < 3; i++) bubble.appendChild(el('span', 'chat-dot'));
-  msg.appendChild(bubble);
-  log.appendChild(msg);
-  log.scrollTop = log.scrollHeight;
-  return msg;
-}
-
-/** A "copy" affordance plus, when the answer used web search, its sources. */
-function decorateAssistantMessage(msg, text, info) {
-  if (!msg) return;
-  const foot = el('div', 'chat-foot');
-
-  const copy = el('button', 'chat-mini', 'Copia');
-  copy.type = 'button';
-  copy.addEventListener('click', () => {
-    const done = () => { copy.textContent = 'Copiato'; setTimeout(() => { copy.textContent = 'Copia'; }, 1400); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(done, () => { copy.textContent = 'Errore'; });
-    }
-  });
-  foot.appendChild(copy);
-
-  if (info && info.web) foot.appendChild(el('span', 'chat-badge', 'cercato sul web'));
-  if (info && info.truncated) foot.appendChild(el('span', 'chat-badge warn', 'risposta troncata'));
-  msg.appendChild(foot);
-
-  const cites = (info && Array.isArray(info.citations) ? info.citations : []).slice(0, 5);
-  if (cites.length) {
-    const list = el('div', 'chat-cites');
-    cites.forEach((c, i) => {
-      const a = el('a', 'chat-cite', String(i + 1) + '. ' + (c.title || c.url));
-      a.setAttribute('href', c.url);
-      setSafeExternalLink(a);
-      list.appendChild(a);
-    });
-    msg.appendChild(list);
-  }
-}
-
-/** Offer a one-click retry instead of leaving the user at a dead end. */
-function appendChatRetry(text) {
-  const log = document.getElementById('chatLog');
-  if (!log) return;
-  const wrap = el('div', 'chat-chips');
-  const chip = el('button', 'chat-chip', 'Riprova');
-  chip.type = 'button';
-  chip.addEventListener('click', () => {
-    if (chatBusy) return;
-    if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
-    sendChat(text);
-  });
-  wrap.appendChild(chip);
-  log.appendChild(wrap);
-  log.scrollTop = log.scrollHeight;
-}
-
-/** Grow the textarea with its content up to the CSS max-height. */
-function autoGrowChatInput(ta) {
-  if (!ta) return;
-  ta.style.height = 'auto';
-  ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
-}
-
-/* ---------- send ---------- */
-
-function setChatBusy(busy) {
-  chatBusy = busy;
-  const input = document.getElementById('chatInput');
-  const sendBtn = document.getElementById('chatSend');
-  if (input) input.disabled = false; // stay typable: the user can queue a thought
-  if (sendBtn) {
-    sendBtn.classList.toggle('is-stop', busy);
-    sendBtn.setAttribute('aria-label', busy ? 'Interrompi generazione' : 'Invia messaggio');
-    sendBtn.title = busy ? 'Interrompi' : 'Invia';
-  }
-}
-
-/** Abort an in-flight generation, keeping whatever text already arrived. */
-function stopChat() {
-  if (chatAbort) chatAbort.abort();
-}
-
-/**
- * Send a turn and stream the reply.
- *
- * Streaming is the whole point of the response handling here: the previous
- * version waited for the complete answer, so a slow free-tier model looked
- * indistinguishable from a broken one. Tokens are rendered as they arrive and
- * the send button becomes a stop button.
- */
-function sendChat(preset) {
-  const input = document.getElementById('chatInput');
-  if (!input) return;
-  if (chatBusy) { stopChat(); return; }
-
-  let text = typeof preset === 'string' ? preset : (input.value || '').trim();
-  if (!text) return;
-  if (text.length > CHAT_MAX_INPUT) text = text.slice(0, CHAT_MAX_INPUT);
-
-  appendChatMessage('user', text);
-  chatHistory.push({ role: 'user', content: text });
-  trimChatHistory();
-
-  if (typeof preset !== 'string') {
-    input.value = '';
-    autoGrowChatInput(input);
-  }
-
-  setChatBusy(true);
-  let typing = showChatTyping();
-  chatAbort = new AbortController();
-
-  /* Bubble the deltas land in, created on the first token so the typing dots
-   * stay visible until the model actually starts speaking. */
-  let msg = null;
-  let bubble = null;
-  let acc = '';
-  let pending = false;
-  let info = { web: false, citations: [], truncated: false };
-
-  const flush = () => {
-    pending = false;
-    if (bubble) {
-      renderChatMarkdown(bubble, acc);
-      const log = document.getElementById('chatLog');
-      if (log) log.scrollTop = log.scrollHeight;
-    }
-  };
-  /* Re-parsing markdown on every token is wasteful and flickers; coalesce into
-   * one render per animation frame. */
-  const schedule = () => {
-    if (pending) return;
-    pending = true;
-    requestAnimationFrame(flush);
-  };
-
-  const onDelta = (chunk) => {
-    if (!msg) {
-      if (typing && typing.parentNode) typing.parentNode.removeChild(typing);
-      typing = null;
-      msg = el('div', 'chat-msg chat-assistant');
-      bubble = el('div', 'chat-bubble brief-body chat-streaming');
-      msg.appendChild(bubble);
-      const log = document.getElementById('chatLog');
-      if (log) log.appendChild(msg);
-    }
-    acc += chunk;
-    schedule();
-  };
-
-  const finish = (errorText) => {
-    if (typing && typing.parentNode) typing.parentNode.removeChild(typing);
-    typing = null;
-    flush();
-    if (bubble) bubble.classList.remove('chat-streaming');
-
-    if (acc.trim()) {
-      chatHistory.push({ role: 'assistant', content: acc });
-      trimChatHistory();
-      decorateAssistantMessage(msg, acc, info);
-    } else {
-      // Drop the unanswered user turn so a retry doesn't send two consecutive
-      // user messages (which would break every follow-up).
-      if (chatHistory.length && chatHistory[chatHistory.length - 1].role === 'user') chatHistory.pop();
-    }
-    if (errorText) {
-      appendChatMessage('system', errorText);
-      appendChatRetry(text);
-    }
-    chatAbort = null;
-    setChatBusy(false);
-    const el2 = document.getElementById('chatInput');
-    if (el2) el2.focus();
-  };
-
-  fetch('/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'same-origin',
-    signal: chatAbort.signal,
-    body: JSON.stringify({
-      messages: chatHistory,
-      context: buildMarketContext(currentSnapshot),
-      web: chatWebMode,
-      stream: true
-    })
-  })
-    .then((res) => {
-      const ctype = res.headers.get('content-type') || '';
-      if (!res.ok || ctype.indexOf('text/event-stream') === -1) {
-        // Failures happen before the first byte, so they still carry a status
-        // and a JSON body.
-        return res.json().catch(() => ({})).then((data) => {
-          finish((data && typeof data.error === 'string' && data.error) ||
-            'Si è verificato un errore. Riprova.');
-        });
-      }
-      return readChatStream(res, onDelta, info).then((err) => finish(err));
-    })
-    .catch((e) => {
-      if (e && e.name === 'AbortError') { finish(null); return; }
-      finish("Impossibile contattare l'assistente. Controlla la connessione e riprova.");
-    });
-}
-
-/**
- * Consume our SSE wire format: `data: {meta|delta|done|error}`.
- * Resolves with an error string, or null when the stream ended cleanly.
- */
-function readChatStream(res, onDelta, info) {
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let error = null;
-
-  const pump = () => reader.read().then(({ done, value }) => {
-    if (done) return error;
-    buffer += decoder.decode(value, { stream: true });
-    let cut;
-    while ((cut = buffer.indexOf('\n\n')) !== -1) {
-      const frame = buffer.slice(0, cut).trim();
-      buffer = buffer.slice(cut + 2);
-      if (!frame.startsWith('data:')) continue;
-      let obj;
-      try { obj = JSON.parse(frame.slice(5).trim()); } catch (_e) { continue; }
-      if (obj.meta) { info.web = !!obj.meta.web; continue; }
-      if (typeof obj.delta === 'string') { onDelta(obj.delta); continue; }
-      if (obj.done) {
-        info.truncated = !!obj.truncated;
-        if (Array.isArray(obj.citations)) info.citations = obj.citations;
-        continue;
-      }
-      if (typeof obj.error === 'string') error = obj.error;
-    }
-    return pump();
-  });
-
-  return pump();
-}
-
-/* ---------- wiring ---------- */
-
-/** Cycle auto -> on -> off and reflect it on the button. */
-function cycleChatWeb(btn) {
-  const next = CHAT_WEB_MODES[(CHAT_WEB_MODES.indexOf(chatWebMode) + 1) % CHAT_WEB_MODES.length];
-  chatWebMode = next;
-  btn.setAttribute('data-mode', next);
-  btn.title = CHAT_WEB_LABEL[next];
-  btn.setAttribute('aria-label', CHAT_WEB_LABEL[next]);
-}
-
-/** Wire the fab/panel toggle, close, Esc, Enter-to-send. Called once from main(). */
-function wireChat() {
-  const fab = document.getElementById('chatFab');
-  const panel = document.getElementById('chatPanel');
-  const closeBtn = document.getElementById('chatClose');
-  const newBtn = document.getElementById('chatNew');
-  const webBtn = document.getElementById('chatWeb');
-  const input = document.getElementById('chatInput');
-  const sendBtn = document.getElementById('chatSend');
-  if (!fab || !panel) return;
-
-  const openChat = () => {
-    panel.hidden = false;
-    fab.classList.add('open');
-    fab.setAttribute('aria-expanded', 'true');
-    // Show the greeting the first time the panel is opened in this session.
-    const log = document.getElementById('chatLog');
-    if (log && !log.childNodes.length) {
-      appendChatMessage('assistant', CHAT_GREETING);
-      renderChatSuggestions();
-    }
-    if (input) { autoGrowChatInput(input); input.focus(); }
-  };
-  const closeChat = (returnFocus) => {
-    panel.hidden = true;
-    fab.classList.remove('open');
-    fab.setAttribute('aria-expanded', 'false');
-    if (returnFocus) fab.focus();
-  };
-
-  fab.addEventListener('click', () => { if (panel.hidden) openChat(); else closeChat(false); });
-  if (closeBtn) closeBtn.addEventListener('click', () => closeChat(true));
-  if (newBtn) newBtn.addEventListener('click', () => { resetChat(); if (input) input.focus(); });
-  if (webBtn) {
-    webBtn.setAttribute('data-mode', chatWebMode);
-    webBtn.title = CHAT_WEB_LABEL[chatWebMode];
-    webBtn.addEventListener('click', () => cycleChatWeb(webBtn));
-  }
-  if (sendBtn) sendBtn.addEventListener('click', () => sendChat());
-
-  if (input) {
-    input.addEventListener('input', () => autoGrowChatInput(input));
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
-    });
-  }
-
-  // Esc stops a generation if one is running, otherwise closes the panel.
-  window.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || panel.hidden) return;
-    if (chatBusy) { stopChat(); return; }
-    closeChat(true);
-  });
+  $('dashboard').hidden = true;
+  $('tape').hidden = true;
+  $('errorTitle').textContent = title;
+  $('errorDetail').textContent = detail || '';
+  $('errorState').hidden = false;
 }
 
 /* ---------- boot ---------- */
 
 async function main() {
-  wireModal();
   wireChat();
   const result = await loadSnapshot();
 
@@ -1694,8 +862,7 @@ async function main() {
     return;
   }
   if (result.status === 'schema-error') {
-    showError('Versione dello schema non supportata',
-      'schema_version = ' + String(result.schemaVersion) + ' (attesa 1).');
+    showError('Versione dello schema non supportata', 'schema_version = ' + String(result.schemaVersion) + ' (attesa 1).');
     return;
   }
   if (result.status !== 'ok') {
@@ -1703,24 +870,30 @@ async function main() {
     return;
   }
 
-  const snapshot = result.snapshot;
-  currentSnapshot = snapshot; // stash for the AI chat grounding context
+  const snap = result.snapshot;
+  setChatSnapshot(snap);
   try {
-    // Render order follows the on-page section order for clarity; every renderer
-    // targets elements by id so the actual ordering is fixed by the markup.
-    renderTopBar(snapshot.meta);
-    renderOverview(snapshot);
-    renderBrief(snapshot);   // Morning Brief now lives beside the Overview heading
-    wireBrief();
-    renderMovers(snapshot);
-    renderSectors(snapshot);
-    renderRates(snapshot);   // also renders the central-bank decision cards
-    renderEarnings(snapshot);
-    renderTriggers(snapshot);
-    renderHeadlines(snapshot);
-    renderFooter(snapshot.meta);
-    wireCosmetics();
-    wireViz();
+    buildRegistry(snap);
+    initDrawer({ instruments: instruments, sectors: sectors, snapshot: snap, get briefNode() { return briefNode; }, topicLabel: topicLabel });
+    renderStatus(snap.meta);
+    renderTape(snap);
+    renderBrief(snap);
+    renderMarkets(snap);
+    renderMovers(snap);
+    renderSectors(snap);
+    renderRates(snap);
+    renderAgenda(snap);
+    renderNews(snap);
+    renderFooter(snap.meta);
+    wireNav();
+    initPalette(paletteEntries(snap));
+    setViewContext(() => {
+      const d = drawerContext();
+      if (d) return d;
+      const tab = activeSection === 'mercati' && activeTab ? ', scheda "' + activeTab.label + '"' : '';
+      return 'L\'utente sta guardando la sezione "' + activeSection + '"' + tab + '.';
+    });
+    document.body.classList.add('ready');
   } catch (e) {
     showError('Errore di rendering', e && e.message ? e.message : String(e));
   }
