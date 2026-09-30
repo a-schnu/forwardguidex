@@ -305,23 +305,44 @@ cb_policy_rates:
   - {series_id: "BOJPR",     name: "BoJ Policy Rate",           area: "JP", bank: "BoJ"}
   - {series_id: "PBOCLPR1Y", name: "PBoC Loan Prime Rate 1Y",   area: "CN", bank: "PBoC"}
 
-# GDELT DOC 2.0 free news queries. `macro: true` queries are MACROECONOMIC /
-# FINANCIAL and are the only ones surfaced in the "Notizie del giorno" section
-# (serve/snapshot.py filters headlines to these topics). `macro: false` queries are
-# geopolitical context: fed to the LLM Morning Brief for regime awareness but NOT
-# shown as news, to keep the news feed strictly macro/financial. (Executive orders
-# come from the Federal Register + corporate events from SEC EDGAR — the triggers
-# section — since X/Twitter has no free API.)
+# GDELT DOC 2.0 free news queries. `macro: true` queries are ECONOMIC and are the
+# only ones surfaced in the "Notizie" section; `macro: false` queries are
+# geopolitical context, fed to the LLM Morning Brief but NOT shown as news.
+# (Executive orders come from the Federal Register + corporate events from SEC
+# EDGAR — the triggers section — since X/Twitter has no free API.)
+#
+# Why so few, and why the outlet list (2026-09-30): GDELT machine-translates all
+# ~65 languages it monitors and matches queries against the translation, so the
+# old unrestricted queries returned Chinese, Greek, Arabic and Serbian articles
+# and, under "dazi", a Brazilian music festival. Every query is therefore
+# restricted to `gdelt_domains` (ingest/news.py appends them as one
+# `(domainis:a OR domainis:b ...)` group). And GDELT throttles per client — CI
+# run 36747513137 lost 7 of 10 topics to 429s — so four broad economic queries
+# replace eight narrow ones; serve/snapshot.py assigns the displayed topic from
+# each headline's title and drops titles that match no economic topic.
+gdelt_domains:
+  - reuters.com
+  - bloomberg.com
+  - ft.com
+  - wsj.com
+  - cnbc.com
+  - marketwatch.com
+  - apnews.com
+  - economist.com
+  - barrons.com
+  - nytimes.com
+  - theguardian.com
+  - bbc.co.uk
+  - bbc.com
+  - ilsole24ore.com
+  - ansa.it
+
 gdelt_queries:
-  # --- macro / financial (shown in Notizie) ---
-  - {key: "fed",        macro: true,  query: "Federal Reserve (interest rate OR rate cut OR inflation)"}
-  - {key: "bce",        macro: true,  query: "European Central Bank (interest rate OR inflation)"}
-  - {key: "inflazione", macro: true,  query: "inflation (CPI OR consumer prices) (United States OR euro area)"}
-  - {key: "lavoro",     macro: true,  query: "(nonfarm payrolls OR unemployment rate OR jobs report)"}
-  - {key: "petrolio",   macro: true,  query: "(crude oil price OR OPEC OR Brent)"}
-  - {key: "dazi",       macro: true,  query: "tariff (trade OR imports OR China OR European Union)"}
-  - {key: "mercati",    macro: true,  query: "(stock market OR S&P 500 OR Wall Street) (earnings OR selloff OR rally)"}
-  - {key: "semis",      macro: true,  query: "semiconductor (chips OR Nvidia OR TSMC OR export controls)"}
+  # --- economics (shown in Notizie), most important first: a throttled run
+  #     loses the tail of this list, not the head ---
+  - {key: "banche_centrali", macro: true, query: '("Federal Reserve" OR FOMC OR "European Central Bank" OR "Bank of England" OR "Bank of Japan" OR "central bank" OR "interest rates")'}
+  - {key: "macro_dati",      macro: true, query: '(inflation OR "consumer prices" OR payrolls OR unemployment OR GDP OR recession OR "retail sales" OR PMI OR "consumer confidence")'}
+  - {key: "commercio_energia", macro: true, query: '(tariffs OR "trade war" OR "trade deal" OR exports OR OPEC OR "oil prices" OR "crude oil" OR "gas prices")'}
+  - {key: "debito_bond",     macro: true, query: '("Treasury yields" OR "bond yields" OR "bond market" OR "budget deficit" OR "public debt" OR "sovereign debt" OR "fiscal policy")'}
   # --- geopolitics: brief context only, NOT shown in Notizie ---
-  - {key: "geopolitica", macro: false, query: "(Iran OR Middle East OR Ukraine) (oil OR sanctions OR conflict)"}
-  - {key: "difesa",      macro: false, query: "defense spending OR military conflict"}
+  - {key: "geopolitica", macro: false, query: '(sanctions OR Ukraine OR Iran OR "Middle East" OR Taiwan) (economy OR oil OR trade OR markets)'}

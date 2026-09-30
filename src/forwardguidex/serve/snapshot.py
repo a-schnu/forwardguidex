@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 from .. import config
 from ..transform import events as fevents
-from ..transform import marts
+from ..transform import marts, news_topics
 from . import calendar as fcal
 from . import rights
 
@@ -32,8 +32,9 @@ _log = logging.getLogger(__name__)
 # How many headlines the published snapshot carries, and how many warehouse rows
 # we consider when choosing them. The candidate pool has to be much larger than
 # the cap: with GDELT's 3-day window a global "newest N" slice can legitimately
-# be filled by two busy topics.
-NEWS_HEADLINE_CAP = 12
+# be filled by two busy topics. 20 rather than 12 since the dashboard filters
+# the feed by topic (2026-09-30): a filter over 12 items leaves ~2 per topic.
+NEWS_HEADLINE_CAP = 20
 NEWS_CANDIDATE_ROWS = 300
 
 SCHEMA_VERSION = 1
@@ -260,6 +261,43 @@ def _select_headlines(candidates: list[dict], *, cap: int) -> list[dict]:
     return picked
 
 
+def _economic_headlines(news_df) -> list[dict]:
+    """The "Notizie" feed: economic headlines only, one per story, fair across topics.
+
+    Rows come from `macro: true` GDELT queries only — the geopolitical ones feed
+    the LLM brief, not this feed. Each headline is then labelled by what its
+    TITLE is about (:mod:`forwardguidex.transform.news_topics`), and titles that
+    name no economic topic are dropped: the query a row came from is not
+    evidence of relevance, because GDELT matches against machine translations.
+    The same story reached through two queries, or syndicated with the same
+    title, is kept once (newest first wins). Only https links survive — the
+    dashboard renders only https and the validator rejects http.
+    """
+    macro_queries = {q.get("key") for q in config.load_universe().get("gdelt_queries", [])
+                     if q.get("macro")}
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    for h in news_df.itertuples():
+        if macro_queries and _str(h.topic) not in macro_queries:
+            continue
+        url = _str(h.url)
+        if not url or not url.startswith("https://"):
+            continue
+        title = news_topics.tidy_title(_str(h.title))
+        topic = news_topics.classify(title)
+        if topic is None:
+            continue
+        story = news_topics.dedupe_key(title)
+        if url in seen or story in seen:
+            continue
+        seen.update((url, story))
+        candidates.append({
+            "topic": topic, "title": title, "domain": _str(h.domain),
+            "url": url, "seendate": _str(h.seendate),
+        })
+    return _select_headlines(candidates, cap=NEWS_HEADLINE_CAP)
+
+
 def _news_source_health(con) -> dict | None:
     """Fetch the latest ingest health rollup for GDELT (may be None on fresh DB)."""
     try:
@@ -393,28 +431,7 @@ def build_snapshot(con, *, market_state: str = "PRE_OPEN",
             "quality": "OK" if val is not None else "PARTIAL",
         })
 
-    # headlines — MACRO/FINANCIAL only. Keep only the topics whose GDELT query is
-    # flagged `macro: true` in the universe (central banks, inflation, jobs, oil,
-    # tariffs, markets, semis); geopolitical topics are excluded from the news feed
-    # (they still feed the LLM brief). Keep only https links (the dashboard renders
-    # only https and the validator rejects http). Fetch a wide pool, filter, then
-    # select round-robin across topics (see `_select_headlines`).
-    macro_topics = {q.get("key") for q in config.load_universe().get("gdelt_queries", [])
-                    if q.get("macro")}
-    news_df = marts.news(con, limit=NEWS_CANDIDATE_ROWS)
-    candidates = []
-    for h in news_df.itertuples():
-        topic = _str(h.topic)
-        if macro_topics and topic not in macro_topics:
-            continue
-        url = _str(h.url)
-        if not url or not url.startswith("https://"):
-            continue
-        candidates.append({
-            "topic": topic, "title": _str(h.title), "domain": _str(h.domain),
-            "url": url, "seendate": _str(h.seendate),
-        })
-    headlines = _select_headlines(candidates, cap=NEWS_HEADLINE_CAP)
+    headlines = _economic_headlines(marts.news(con, limit=NEWS_CANDIDATE_ROWS))
 
     # brief
     brief = {"markdown": "", "created_at": None}
@@ -847,21 +864,27 @@ def demo_snapshot(now: datetime | None = None) -> dict:
              "as_of": bis, "source": "BIS", "quality": "OK"},
         ],
         "movers": {"gainers": all_eq[:6], "losers": list(reversed(all_eq[-6:]))},
-        # Macro/financial topics only (mirrors the live news filter): central banks,
-        # inflation, oil, tariffs, semis, markets — no pure geopolitics.
+        # Economic topics only, labelled by title (mirrors the live news filter in
+        # `_economic_headlines`) — no pure geopolitics, no single-stock stories.
         "headlines": [
-            {"topic": "fed", "title": "Fed officials signal patience on further rate cuts", "domain": "wsj.com",
+            {"topic": "banche_centrali", "title": "Fed officials signal patience on further rate cuts", "domain": "wsj.com",
              "url": "https://www.wsj.com/economy", "seendate": seen},
             {"topic": "inflazione", "title": "US core CPI eases to 2.9%, reinforcing disinflation trend", "domain": "reuters.com",
              "url": "https://www.reuters.com/markets/us/", "seendate": seen},
-            {"topic": "petrolio", "title": "OPEC+ holds output steady ahead of demand review", "domain": "reuters.com",
+            {"topic": "banche_centrali", "title": "ECB's Lagarde says policy is in a good place as euro-area inflation nears target",
+             "domain": "ft.com", "url": "https://www.ft.com/global-economy", "seendate": seen},
+            {"topic": "energia", "title": "OPEC+ holds output steady ahead of demand review", "domain": "reuters.com",
              "url": "https://www.reuters.com/markets/commodities/", "seendate": seen},
-            {"topic": "dazi", "title": "New tariff round on imports rattles trade-exposed sectors", "domain": "ft.com",
+            {"topic": "commercio", "title": "New tariff round on imports rattles trade-exposed sectors", "domain": "ft.com",
              "url": "https://www.ft.com/world", "seendate": seen},
-            {"topic": "semis", "title": "Chip demand cools as AI capex guidance trimmed", "domain": "bloomberg.com",
-             "url": "https://www.bloomberg.com/technology", "seendate": seen},
-            {"topic": "mercati", "title": "Wall Street steadies as defensives lead the rotation", "domain": "bloomberg.com",
-             "url": "https://www.bloomberg.com/markets", "seendate": seen},
+            {"topic": "lavoro", "title": "Payrolls beat forecasts as unemployment rate holds at 4.1%", "domain": "cnbc.com",
+             "url": "https://www.cnbc.com/economy/", "seendate": seen},
+            {"topic": "crescita", "title": "Euro-zone PMI signals manufacturing contraction for a fourth month",
+             "domain": "bloomberg.com", "url": "https://www.bloomberg.com/economics", "seendate": seen},
+            {"topic": "debito_bond", "title": "Treasury yields climb as deficit worries resurface", "domain": "marketwatch.com",
+             "url": "https://www.marketwatch.com/markets/bonds", "seendate": seen},
+            {"topic": "crescita", "title": "Istat conferma la crescita del Pil italiano nel secondo trimestre",
+             "domain": "ilsole24ore.com", "url": "https://www.ilsole24ore.com/sez/economia", "seendate": seen},
         ],
         # Real values as of 2026-08-02 (derived live from BIS WS_CBPOL) so the demo
         # mirrors production: Fed cut, BCE + BoJ hiked, BoE cut, PBoC unchanged.

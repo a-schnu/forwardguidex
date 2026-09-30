@@ -25,7 +25,7 @@ concurrency:
 jobs:
   test:
     name: ruff + pytest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 from 2026-10-19
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -58,7 +58,7 @@ jobs:
 
   install-locks:
     name: production locks install cleanly (${{ matrix.lock }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 from 2026-10-19
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -91,7 +91,7 @@ jobs:
 
   gate:
     name: gate + chat proxy behaviour
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 from 2026-10-19
     timeout-minutes: 10
     steps:
       - name: Checkout

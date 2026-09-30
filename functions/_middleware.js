@@ -128,71 +128,57 @@ const NO_STORE = {
 
 const LOGIN_CSS = `
 *{box-sizing:border-box}
+/* Same register as the dashboard (app/css/base.css): flat dark surfaces,
+   hairline borders, one accent — the logo's blue. System fonts only: the
+   self-hosted ones sit behind this gate. */
 :root{
-  --bg:#000; --white:#f4f4f7; --muted:#9696a2;
-  --violet:#8b5cff; --violet-soft:#bda9ff;
-  --glass-bg:rgba(255,255,255,.05); --glass-brd:rgba(255,255,255,.12);
-  --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif;
+  --bg:#0a0b0d; --panel:#111317; --panel-2:#161a1f; --line:#21252c; --line-2:#2d323b;
+  --text:#e8eaed; --text-2:#b4bac3; --muted:#80878f; --faint:#5a616b;
+  --accent:#4d9fff; --accent-soft:#8fc4ff; --down:#f0555a;
+  --font:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Consolas,monospace;
 }
 html,body{height:100%;margin:0}
 body{
-  background:var(--bg); color:var(--white); font-family:var(--font);
-  display:grid; place-items:center; padding:24px; overflow:hidden;
+  background:var(--bg); color:var(--text); font-family:var(--font);
+  -webkit-font-smoothing:antialiased; display:grid; place-items:center; padding:24px;
 }
-/* Two soft light sources, same violet/blue register as the dashboard. */
-body::before,body::after{
-  content:""; position:fixed; border-radius:50%; filter:blur(80px);
-  pointer-events:none; z-index:0;
-}
-body::before{width:56vmax;height:56vmax;top:-20vmax;left:-14vmax;
-  background:radial-gradient(circle,rgba(139,92,255,.46),transparent 70%)}
-body::after{width:48vmax;height:48vmax;bottom:-18vmax;right:-12vmax;
-  background:radial-gradient(circle,rgba(38,169,255,.36),transparent 70%)}
 .card{
-  position:relative; z-index:1; width:100%; max-width:392px; padding:38px 34px 32px;
-  border:1px solid var(--glass-brd); border-radius:22px; background:var(--glass-bg);
-  backdrop-filter:blur(22px) saturate(160%);
-  box-shadow:0 24px 70px rgba(0,0,0,.7), 0 0 0 1px rgba(139,92,255,.16),
-    inset 0 1px 0 rgba(255,255,255,.18);
-  animation:rise .5s cubic-bezier(.2,.8,.2,1) both;
+  width:100%; max-width:380px; padding:30px 28px 24px;
+  background:var(--panel); border:1px solid var(--line-2); border-radius:14px;
+  box-shadow:0 30px 80px rgba(0,0,0,.55);
+  animation:rise .35s cubic-bezier(.2,.8,.2,1) both;
 }
-@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
-.brand{display:flex;align-items:center;gap:9px;margin-bottom:26px}
-.brand svg{width:34px;height:auto;display:block}
-.brand span{
-  font-size:15px;font-weight:600;letter-spacing:.2px;
-  background:linear-gradient(90deg,#fff,#bcd3ff);
-  -webkit-background-clip:text;background-clip:text;color:transparent;
-}
-h1{margin:0 0 8px;font-size:29px;line-height:1.15;letter-spacing:-.6px;font-weight:650}
-.caption{margin:0 0 26px;font-size:13.5px;line-height:1.55;color:var(--muted);max-width:34ch;
-  text-wrap:balance}
-label{display:block;font-size:11px;letter-spacing:.9px;text-transform:uppercase;
-  color:var(--muted);margin-bottom:8px}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}}
+.brand{display:flex;align-items:center;gap:9px;margin-bottom:28px}
+.brand svg{width:30px;height:auto;display:block}
+.brand span{font-size:15px;font-weight:700;letter-spacing:-.01em;color:var(--text)}
+.brand .tag{margin-left:auto;font-family:var(--mono);font-size:10.5px;font-weight:600;color:var(--muted);
+  border:1px solid var(--line-2);border-radius:5px;padding:2px 6px}
+h1{margin:0 0 6px;font-size:24px;line-height:1.2;letter-spacing:-.02em;font-weight:600}
+.caption{margin:0 0 24px;font-size:13.5px;line-height:1.55;color:var(--muted);max-width:34ch;text-wrap:balance}
+label{display:block;font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:7px}
 input{
-  width:100%;padding:13px 15px;font-size:15px;font-family:inherit;color:var(--white);
-  background:rgba(255,255,255,.045);border:1px solid var(--glass-brd);border-radius:13px;
-  outline:none;transition:border-color .18s,box-shadow .18s,background .18s;
+  width:100%;padding:11px 13px;font-size:15px;font-family:inherit;color:var(--text);
+  background:var(--panel-2);border:1px solid var(--line);border-radius:8px;outline:none;
+  transition:border-color .15s,box-shadow .15s;
 }
-input:focus{border-color:var(--violet);background:rgba(139,92,255,.07);
-  box-shadow:0 0 0 3px rgba(139,92,255,.2),0 0 26px rgba(139,92,255,.28)}
+input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(77,159,255,.18)}
 button{
-  width:100%;margin-top:16px;padding:13px 16px;font-size:14.5px;font-weight:600;
-  font-family:inherit;color:#fff;cursor:pointer;border:0;border-radius:13px;
-  background:linear-gradient(135deg,#8b5cff,#2f6fe0);
-  box-shadow:0 8px 24px rgba(139,92,255,.34);
-  transition:transform .14s,box-shadow .18s,filter .18s;
+  width:100%;margin-top:14px;padding:11px 16px;font-size:14px;font-weight:600;font-family:inherit;
+  color:#06111f;background:var(--accent);border:0;border-radius:8px;cursor:pointer;
+  transition:filter .15s,transform .1s;
 }
-button:hover{filter:brightness(1.08);box-shadow:0 10px 30px rgba(139,92,255,.46)}
+button:hover{filter:brightness(1.1)}
 button:active{transform:translateY(1px)}
-button:focus-visible,input:focus-visible{outline:2px solid var(--violet-soft);outline-offset:2px}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent-soft);outline-offset:2px}
 .err{
-  display:flex;gap:8px;margin:0 0 18px;padding:10px 12px;font-size:12.5px;line-height:1.45;
-  color:#ffcdbd;border:1px solid rgba(255,143,111,.34);border-radius:11px;
-  background:rgba(255,143,111,.1);
+  margin:0 0 16px;padding:9px 11px;font-size:12.5px;line-height:1.45;color:#ffc9cb;
+  background:rgba(240,85,90,.12);border:1px solid rgba(240,85,90,.4);border-radius:8px;
 }
-.foot{margin:22px 0 0;font-size:11px;line-height:1.5;color:#6f6f7b}
-@media (prefers-reduced-motion:reduce){.card{animation:none}button{transition:none}}
+.foot{margin:22px 0 0;padding-top:14px;border-top:1px solid var(--line);font-size:11px;line-height:1.5;color:var(--faint)}
+@media (prefers-reduced-motion:reduce){.card{animation:none}button,input{transition:none}}
 `;
 
 // Same mark as the dashboard header (app/index.html), inlined: the login page is
@@ -225,7 +211,7 @@ function loginPage(status, { failed = false } = {}) {
 <style>${LOGIN_CSS}</style>
 </head><body>
 <main class="card">
-  <div class="brand">${BRAND_MARK}<span>ForwardGuidex</span></div>
+  <div class="brand">${BRAND_MARK}<span>ForwardGuidex</span><span class="tag">FWDX</span></div>
   <h1>Get inside</h1>
   <p class="caption">Make your own predictions, and know what to expect from the future.</p>
   ${error}

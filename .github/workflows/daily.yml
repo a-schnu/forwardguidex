@@ -58,7 +58,7 @@ jobs:
   # ---------------------------------------------------------------------
   build-validate-deploy:
     name: run-daily -> export -> validate -> deploy -> smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 from 2026-10-19
     environment: production
     # Bounded job budget: data pull + build + deploy + smoke normally finishes
     # in ~15 min; the GitHub-default 6h timeout would mask a stuck provider
@@ -234,11 +234,16 @@ jobs:
       # -----------------------------------------------------------------
       - name: Deploy app/ to Cloudflare Pages (Direct Upload)
         id: deploy_cf
-        uses: cloudflare/wrangler-action@da0e0dfe58b7a431659754fdf3f186c529afbe65 # v3.14.1
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3 (node24)
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy app --project-name=fgx-dashboard --branch=main
+          # v4 of the action defaults to Wrangler 4; pin the Wrangler every deploy
+          # so far has used, so moving the action to Node 24 changes nothing else.
+          # --commit-dirty: the tree is dirty by design (we just copied the
+          # snapshot into app/data/), which is what the warning was about.
+          wranglerVersion: "3.90.0"
+          command: pages deploy app --project-name=fgx-dashboard --branch=main --commit-dirty=true
 
       # -----------------------------------------------------------------
       # P0.2 — Fail-closed smoke test.
@@ -387,7 +392,7 @@ jobs:
     name: Archive validated snapshot to Firestore (WIF, create-only)
     needs: build-validate-deploy
     if: ${{ !cancelled() && needs.build-validate-deploy.outputs.validated == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 from 2026-10-19
     environment: production
     timeout-minutes: 15
     permissions:
@@ -429,7 +434,7 @@ jobs:
 
       - name: Authenticate to GCP (WIF, writer service account)
         id: auth
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (node24)
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_WRITER_SA }}
