@@ -71,41 +71,33 @@ def test_dedupe_key_ignores_case_and_punctuation():
     assert T.dedupe_key("Fed holds rates.") == T.dedupe_key("FED HOLDS RATES")
 
 
-# ---------- compose_query ----------
+# ---------- queries ----------
 
-def test_compose_query_appends_one_exact_host_group():
-    q = newsmod.compose_query("(inflation OR CPI)", ["reuters.com", "FT.com", "reuters.com"])
-    assert q == "(inflation OR CPI) (domainis:reuters.com OR domainis:ft.com)"
-
-
-def test_compose_query_single_domain_is_not_parenthesised():
-    # GDELT rejects a parenthesised group with a single term
-    assert newsmod.compose_query("inflation", ["ft.com"]) == "inflation domainis:ft.com"
+# Run 36786024797 (2026-09-30): queries of ~500 chars (terms + a 15-outlet
+# `domainis:` group) came back "Your query was too short or too long". The
+# limit is undocumented; the queries GDELT accepted before were <= ~100 chars.
+MAX_QUERY_CHARS = 120
 
 
-def test_compose_query_without_domains_is_unchanged():
-    assert newsmod.compose_query("inflation", []) == "inflation"
-    assert newsmod.compose_query("inflation", None) == "inflation"
-
-
-def test_compose_query_drops_anything_that_is_not_a_bare_host():
-    q = newsmod.compose_query("x", ["ok.com", "evil.com) OR (y", "sp ace.com", "noTLD", "a.b-c.it"])
-    assert q == "x (domainis:ok.com OR domainis:a.b-c.it)"
-
-
-def test_configured_queries_are_restricted_to_trusted_outlets():
+def test_configured_queries_are_short_and_english_only():
     from forwardguidex import config
     uni = config.load_universe()
-    domains = uni["gdelt_domains"]
-    assert "reuters.com" in domains and "ilsole24ore.com" in domains
-    for item in uni["gdelt_queries"]:
-        q = newsmod.compose_query(item["query"], domains)
-        assert q.count("domainis:") == len(set(domains)), item["key"]
-    # the economic feed exists at all
-    assert any(q.get("macro") for q in uni["gdelt_queries"])
+    queries = uni["gdelt_queries"]
+    assert any(q.get("macro") for q in queries)
+    assert len(queries) <= 5, "GDELT throttles per client: every query is another chance of a 429"
+    for q in queries:
+        assert len(q["query"]) <= MAX_QUERY_CHARS, (q["key"], len(q["query"]))
+        assert "sourcelang:english" in q["query"], q["key"]
+        assert "domainis:" not in q["query"], "outlets are preferred downstream, not in the query"
 
 
-def test_ingest_sends_the_restricted_query(monkeypatch):
+def test_trusted_outlets_are_configured():
+    from forwardguidex import config
+    trusted = config.load_universe()["news_trusted_domains"]
+    assert {"reuters.com", "ft.com", "bloomberg.com", "cnbc.com"} <= set(trusted)
+
+
+def test_ingest_sends_the_configured_query_verbatim(monkeypatch):
     sent = []
 
     class Client:
@@ -121,12 +113,25 @@ def test_ingest_sends_the_restricted_query(monkeypatch):
 
     monkeypatch.setattr(newsmod, "HttpClient", Client)
     monkeypatch.setattr(newsmod, "load_universe", lambda: {
-        "gdelt_domains": ["reuters.com", "ft.com"],
-        "gdelt_queries": [{"key": "k", "query": "(inflation OR CPI)"}],
+        "news_trusted_domains": ["reuters.com", "ft.com"],
+        "gdelt_queries": [{"key": "k", "query": "(inflation OR CPI) sourcelang:english"}],
     })
     monkeypatch.setattr(newsmod, "_persist_health", lambda con, ts, r: None)
     newsmod.ingest_news_with_report(con=None)
-    assert sent == ["(inflation OR CPI) (domainis:reuters.com OR domainis:ft.com)"]
+    assert sent == ["(inflation OR CPI) sourcelang:english"]
+
+
+@pytest.mark.parametrize("domain,url,ok", [
+    ("reuters.com", "https://www.reuters.com/x", True),
+    ("uk.reuters.com", "https://uk.reuters.com/x", True),
+    ("www.ft.com", "https://www.ft.com/x", True),
+    ("notreuters.com", "https://notreuters.com/x", False),
+    ("microsoft.com", "https://microsoft.com/x", False),   # not "ft.com"
+    ("", "https://markets.ft.com/x", True),                # URL-host fallback
+    (None, None, False),
+])
+def test_is_trusted(domain, url, ok):
+    assert T.is_trusted(domain, url, ["reuters.com", "ft.com"]) is ok
 
 
 # ---------- snapshot feed ----------
@@ -135,12 +140,15 @@ def _rows(*rows):
     return pd.DataFrame(rows, columns=["topic", "title", "domain", "url", "seendate"])
 
 
-def _uni(monkeypatch):
-    monkeypatch.setattr(S.config, "load_universe", lambda: {"gdelt_queries": [
-        {"key": "macro_dati", "macro": True, "query": "q1"},
-        {"key": "banche_centrali", "macro": True, "query": "q2"},
-        {"key": "geopolitica", "macro": False, "query": "q3"},
-    ]})
+def _uni(monkeypatch, trusted=None):
+    monkeypatch.setattr(S.config, "load_universe", lambda: {
+        "gdelt_queries": [
+            {"key": "macro_dati", "macro": True, "query": "q1"},
+            {"key": "banche_centrali", "macro": True, "query": "q2"},
+            {"key": "geopolitica", "macro": False, "query": "q3"},
+        ],
+        "news_trusted_domains": trusted or [],
+    })
 
 
 def test_feed_labels_by_title_and_drops_non_economic(monkeypatch):
@@ -186,3 +194,29 @@ def test_feed_tidies_titles(monkeypatch):
 def test_demo_headlines_use_title_topics():
     for h in S.demo_snapshot()["headlines"]:
         assert T.classify(h["title"]) == h["topic"], h["title"]
+
+
+def test_feed_prefers_trusted_outlets_and_fills_with_the_rest(monkeypatch):
+    _uni(monkeypatch, trusted=["reuters.com"])
+    monkeypatch.setattr(S, "NEWS_HEADLINE_CAP", 2)
+    out = S._economic_headlines(_rows(
+        # newest, but not trusted
+        ("macro_dati", "Inflation jumps in Freedonia", "blog.example", "https://b/1", "20260930T180000Z"),
+        ("macro_dati", "Payrolls beat forecasts", "reuters.com", "https://r/1", "20260930T160000Z"),
+        ("banche_centrali", "Fed holds rates steady", "blog.example", "https://b/2", "20260930T150000Z"),
+    ))
+    urls = [h["url"] for h in out]
+    assert "https://r/1" in urls               # the trusted one always makes it
+    assert len(urls) == 2                      # the free slot is filled from the rest
+    assert out == sorted(out, key=lambda h: h["seendate"], reverse=True)
+
+
+def test_feed_is_all_trusted_when_there_are_enough(monkeypatch):
+    _uni(monkeypatch, trusted=["reuters.com", "ft.com"])
+    monkeypatch.setattr(S, "NEWS_HEADLINE_CAP", 2)
+    out = S._economic_headlines(_rows(
+        ("macro_dati", "Inflation jumps in Freedonia", "blog.example", "https://b/1", "20260930T180000Z"),
+        ("macro_dati", "Payrolls beat forecasts", "reuters.com", "https://r/1", "20260930T160000Z"),
+        ("banche_centrali", "Fed holds rates steady", "ft.com", "https://f/1", "20260930T150000Z"),
+    ))
+    assert {h["url"] for h in out} == {"https://r/1", "https://f/1"}

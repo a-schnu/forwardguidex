@@ -311,16 +311,33 @@ cb_policy_rates:
 # (Executive orders come from the Federal Register + corporate events from SEC
 # EDGAR — the triggers section — since X/Twitter has no free API.)
 #
-# Why so few, and why the outlet list (2026-09-30): GDELT machine-translates all
-# ~65 languages it monitors and matches queries against the translation, so the
-# old unrestricted queries returned Chinese, Greek, Arabic and Serbian articles
-# and, under "dazi", a Brazilian music festival. Every query is therefore
-# restricted to `gdelt_domains` (ingest/news.py appends them as one
-# `(domainis:a OR domainis:b ...)` group). And GDELT throttles per client — CI
-# run 36747513137 lost 7 of 10 topics to 429s — so four broad economic queries
-# replace eight narrow ones; serve/snapshot.py assigns the displayed topic from
-# each headline's title and drops titles that match no economic topic.
-gdelt_domains:
+# Why these look the way they do:
+#   * GDELT matches queries against machine translations of ~65 languages, so an
+#     unfiltered query returned Chinese, Greek and Arabic articles (and a music
+#     festival under "dazi") in CI run 36747513137. `sourcelang:english` keeps
+#     the feed readable; serve/snapshot.py then labels each headline from its
+#     title and drops titles that name no economic topic.
+#   * Keep each query SHORT. Putting the outlet list below into the query as a
+#     `(domainis:a OR ...)` group made them ~500 chars, and GDELT answered
+#     "Your query was too short or too long" (run 36786024797, 0/5 topics).
+#     The limit is undocumented; these are the size of the pre-2026-09-30
+#     queries that GDELT did accept. tests/test_news_topics.py enforces a cap.
+#   * Few requests: GDELT throttles per client and shared CI runners hit it
+#     constantly (7/10 topics lost to 429 in run 36747513137).
+gdelt_queries:
+  # --- economics (shown in Notizie), most important first: a throttled run
+  #     loses the tail of this list, not the head ---
+  - {key: "banche_centrali", macro: true, query: '("central bank" OR "Federal Reserve" OR ECB OR "interest rates") sourcelang:english'}
+  - {key: "macro_dati",      macro: true, query: '(inflation OR unemployment OR GDP OR recession OR payrolls) sourcelang:english'}
+  - {key: "commercio_debito", macro: true, query: '(tariffs OR "oil prices" OR OPEC OR "bond yields" OR "budget deficit") sourcelang:english'}
+  # --- geopolitics: brief context only, NOT shown in Notizie ---
+  - {key: "geopolitica", macro: false, query: '(sanctions OR Ukraine OR Iran OR "Middle East") (oil OR trade OR economy) sourcelang:english'}
+
+# Outlets the "Notizie" feed prefers (serve/snapshot.py `_economic_headlines`):
+# headlines from these fill the feed first; other English-language sources only
+# fill slots these leave empty. Matched on the host or any subdomain of it.
+# NOT sent to GDELT — see the query-length note above.
+news_trusted_domains:
   - reuters.com
   - bloomberg.com
   - ft.com
@@ -334,15 +351,15 @@ gdelt_domains:
   - theguardian.com
   - bbc.co.uk
   - bbc.com
+  - fortune.com
+  - axios.com
+  - businessinsider.com
+  - politico.eu
+  - dw.com
+  - euronews.com
+  - scmp.com
+  - nikkei.com
+  - finance.yahoo.com
+  - investing.com
   - ilsole24ore.com
   - ansa.it
-
-gdelt_queries:
-  # --- economics (shown in Notizie), most important first: a throttled run
-  #     loses the tail of this list, not the head ---
-  - {key: "banche_centrali", macro: true, query: '("Federal Reserve" OR FOMC OR "European Central Bank" OR "Bank of England" OR "Bank of Japan" OR "central bank" OR "interest rates")'}
-  - {key: "macro_dati",      macro: true, query: '(inflation OR "consumer prices" OR payrolls OR unemployment OR GDP OR recession OR "retail sales" OR PMI OR "consumer confidence")'}
-  - {key: "commercio_energia", macro: true, query: '(tariffs OR "trade war" OR "trade deal" OR exports OR OPEC OR "oil prices" OR "crude oil" OR "gas prices")'}
-  - {key: "debito_bond",     macro: true, query: '("Treasury yields" OR "bond yields" OR "bond market" OR "budget deficit" OR "public debt" OR "sovereign debt" OR "fiscal policy")'}
-  # --- geopolitics: brief context only, NOT shown in Notizie ---
-  - {key: "geopolitica", macro: false, query: '(sanctions OR Ukraine OR Iran OR "Middle East" OR Taiwan) (economy OR oil OR trade OR markets)'}

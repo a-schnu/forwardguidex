@@ -35,7 +35,7 @@ _log = logging.getLogger(__name__)
 # be filled by two busy topics. 20 rather than 12 since the dashboard filters
 # the feed by topic (2026-09-30): a filter over 12 items leaves ~2 per topic.
 NEWS_HEADLINE_CAP = 20
-NEWS_CANDIDATE_ROWS = 300
+NEWS_CANDIDATE_ROWS = 1200  # 3 economic queries x 250 records, plus geopolitics
 
 SCHEMA_VERSION = 1
 CADENCE = "EOD"
@@ -272,9 +272,14 @@ def _economic_headlines(news_df) -> list[dict]:
     The same story reached through two queries, or syndicated with the same
     title, is kept once (newest first wins). Only https links survive — the
     dashboard renders only https and the validator rejects http.
+
+    Outlets in ``news_trusted_domains`` fill the feed first; other sources only
+    fill the slots they leave. The outlet list cannot go into the GDELT query
+    itself — that made the queries too long for GDELT (run 36786024797).
     """
-    macro_queries = {q.get("key") for q in config.load_universe().get("gdelt_queries", [])
-                     if q.get("macro")}
+    uni = config.load_universe()
+    macro_queries = {q.get("key") for q in uni.get("gdelt_queries", []) if q.get("macro")}
+    trusted = uni.get("news_trusted_domains") or []
     candidates: list[dict] = []
     seen: set[str] = set()
     for h in news_df.itertuples():
@@ -295,7 +300,14 @@ def _economic_headlines(news_df) -> list[dict]:
             "topic": topic, "title": title, "domain": _str(h.domain),
             "url": url, "seendate": _str(h.seendate),
         })
-    return _select_headlines(candidates, cap=NEWS_HEADLINE_CAP)
+    flags = [news_topics.is_trusted(c["domain"], c["url"], trusted) for c in candidates]
+    preferred = [c for c, ok in zip(candidates, flags, strict=True) if ok]
+    others = [c for c, ok in zip(candidates, flags, strict=True) if not ok]
+    picked = _select_headlines(preferred, cap=NEWS_HEADLINE_CAP)
+    if len(picked) < NEWS_HEADLINE_CAP:
+        picked += _select_headlines(others, cap=NEWS_HEADLINE_CAP - len(picked))
+        picked.sort(key=lambda h: h.get("seendate") or "", reverse=True)
+    return picked
 
 
 def _news_source_health(con) -> dict | None:
@@ -327,14 +339,23 @@ def _collect_source_health(con) -> dict:
 # News is a REQUIRED domain: a total-provider outage cannot ship as quality=OK.
 _REQUIRED_HEALTH_KEYS = ("gdelt",)
 
+# ...but it is not a reason to withhold the day's prices and rates. Until
+# 2026-10-01 a GDELT FAILED made the whole snapshot FAILED, which smoke.py
+# refuses, so run 36786024797 deployed, failed smoke and rolled back fresh
+# market data to yesterday's because GDELT had throttled all 5 queries. The
+# owner chose: ship it, marked DEGRADED — the outage stays visible in
+# meta.quality, source_health and the dashboard's coverage note.
+_DEGRADE_ONLY_HEALTH_KEYS = frozenset({"gdelt"})
+
 
 def _quality_from_health(source_health: dict, freshness_overall: str,
                          base_quality: str) -> str:
     """Derive published ``meta.quality`` from source_health + freshness.
 
     OK -> only if every required provider is OK AND freshness is FRESH.
-    DEGRADED -> at least one required provider is DEGRADED (partial failure).
-    FAILED -> any required provider is FAILED (validator will block deployment).
+    DEGRADED -> a required provider is DEGRADED, or a degrade-only provider
+        (news) FAILED outright.
+    FAILED -> a required provider that is not degrade-only FAILED.
     """
     if freshness_overall not in ("FRESH",):
         base_quality = "DEGRADED"
@@ -343,6 +364,8 @@ def _quality_from_health(source_health: dict, freshness_overall: str,
     rank = {"OK": 0, "DEGRADED": 1, "FAILED": 2}
     for key in _REQUIRED_HEALTH_KEYS:
         s = (source_health.get(key) or {}).get("status")
+        if s == "FAILED" and key in _DEGRADE_ONLY_HEALTH_KEYS:
+            s = "DEGRADED"
         if s in rank and rank[s] > rank[worst]:
             worst = s
     if rank[worst] > rank.get(base_quality, 0):

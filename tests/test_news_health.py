@@ -305,3 +305,28 @@ def test_gdelt_query_window_and_page_size_are_sent(monkeypatch):
     # A window wider than one day is the whole point — guard against a silent revert.
     assert newsmod.GDELT_TIMESPAN != "1d"
     assert newsmod.GDELT_MAXRECORDS >= 150
+
+
+# Owner decision 2026-10-01 (after run 36786024797): a total news outage ships
+# the day's markets as DEGRADED instead of a FAILED snapshot that smoke.py
+# refuses and rolls back.
+def test_total_news_outage_degrades_but_does_not_fail_the_snapshot():
+    sh = {"gdelt": {"status": "FAILED", "attempted_queries": 4, "successful_queries": 0,
+                    "failed_queries": 4, "rate_limited_queries": 4, "rows": 0}}
+    assert S._quality_from_health(sh, "FRESH", "OK") == "DEGRADED"
+    assert S._quality_from_health(sh, "STALE", "OK") == "DEGRADED"
+
+
+def test_total_news_outage_snapshot_still_validates_and_is_never_ok():
+    payload = S.demo_snapshot()
+    payload["headlines"] = []
+    payload["meta"]["source_health"] = {"gdelt": {
+        "status": "FAILED", "attempted_queries": 4, "successful_queries": 0,
+        "failed_queries": 4, "rate_limited_queries": 4, "rows": 0,
+        "last_success_at": None, "errors": []}}
+    payload["meta"]["quality"] = S._quality_from_health(
+        payload["meta"]["source_health"], "FRESH", "OK")
+    assert payload["meta"]["quality"] == "DEGRADED"
+    assert not [e for e in V._source_health_errors(payload)], V._source_health_errors(payload)
+    payload["meta"]["quality"] = "OK"
+    assert V._source_health_errors(payload), "an outage must still never ship as OK"
