@@ -339,14 +339,23 @@ def _collect_source_health(con) -> dict:
 # News is a REQUIRED domain: a total-provider outage cannot ship as quality=OK.
 _REQUIRED_HEALTH_KEYS = ("gdelt",)
 
+# ...but it is not a reason to withhold the day's prices and rates. Until
+# 2026-10-01 a GDELT FAILED made the whole snapshot FAILED, which smoke.py
+# refuses, so run 36786024797 deployed, failed smoke and rolled back fresh
+# market data to yesterday's because GDELT had throttled all 5 queries. The
+# owner chose: ship it, marked DEGRADED — the outage stays visible in
+# meta.quality, source_health and the dashboard's coverage note.
+_DEGRADE_ONLY_HEALTH_KEYS = frozenset({"gdelt"})
+
 
 def _quality_from_health(source_health: dict, freshness_overall: str,
                          base_quality: str) -> str:
     """Derive published ``meta.quality`` from source_health + freshness.
 
     OK -> only if every required provider is OK AND freshness is FRESH.
-    DEGRADED -> at least one required provider is DEGRADED (partial failure).
-    FAILED -> any required provider is FAILED (validator will block deployment).
+    DEGRADED -> a required provider is DEGRADED, or a degrade-only provider
+        (news) FAILED outright.
+    FAILED -> a required provider that is not degrade-only FAILED.
     """
     if freshness_overall not in ("FRESH",):
         base_quality = "DEGRADED"
@@ -355,6 +364,8 @@ def _quality_from_health(source_health: dict, freshness_overall: str,
     rank = {"OK": 0, "DEGRADED": 1, "FAILED": 2}
     for key in _REQUIRED_HEALTH_KEYS:
         s = (source_health.get(key) or {}).get("status")
+        if s == "FAILED" and key in _DEGRADE_ONLY_HEALTH_KEYS:
+            s = "DEGRADED"
         if s in rank and rank[s] > rank[worst]:
             worst = s
     if rank[worst] > rank.get(base_quality, 0):
