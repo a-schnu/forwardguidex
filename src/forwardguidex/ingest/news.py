@@ -10,7 +10,6 @@ transient rate-limit burst from a legitimate zero-result day.
 from __future__ import annotations
 
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -92,8 +91,12 @@ GDELT_CONSECUTIVE_FAILURE_LIMIT = 4
 # window with the old 50-record page would return the same newest 50 as a 1-day
 # window and back-fill exactly nothing. 150 = 3 x the old page; the documented
 # ceiling is 250.
+#
+# 250 since 2026-10-01: queries are filtered by language only, and the snapshot
+# prefers a list of trusted outlets downstream (serve/snapshot.py), so a bigger
+# page means more trusted candidates for the same number of requests.
 GDELT_TIMESPAN = "3d"
-GDELT_MAXRECORDS = 150
+GDELT_MAXRECORDS = 250
 
 # Failure classes that mean "the provider is under pressure" and should widen
 # the spacing for the *next* topic, not just retry the current one.
@@ -105,33 +108,6 @@ _PRESSURE_CLASSES = frozenset({
 })
 
 _log = logging.getLogger(__name__)
-
-# A domain is a bare host: letters, digits, dots, hyphens. Anything else would
-# change the meaning of the query we send, so it is dropped, not escaped.
-_DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$")
-
-
-def compose_query(query: str, domains: list[str] | None) -> str:
-    """Restrict ``query`` to ``domains`` with one ``(domainis:a OR ...)`` group.
-
-    GDELT matches queries against machine translations of every language it
-    monitors, so an unrestricted query returns articles from anywhere; the
-    outlet list is what keeps the feed on-topic and readable (see the
-    ``gdelt_domains`` note in config/universe.yaml). ``domainis:`` is GDELT's
-    exact-host operator — ``domain:`` is a substring match, under which
-    ``ft.com`` would also match ``microsoft.com``.
-
-    GDELT rejects a parenthesised group with a single term, so one domain is
-    appended bare.
-    """
-    clean = [d.strip().lower() for d in (domains or []) if isinstance(d, str)]
-    clean = [d for d in dict.fromkeys(clean) if _DOMAIN_RE.match(d)]
-    if not clean:
-        return query
-    if len(clean) == 1:
-        return f"{query} domainis:{clean[0]}"
-    return f"{query} (" + " OR ".join(f"domainis:{d}" for d in clean) + ")"
-
 
 @dataclass
 class QueryOutcome:
@@ -275,11 +251,9 @@ def ingest_news_with_report(con) -> NewsCollectionReport:
     spacing = GDELT_MIN_SPACING_SEC
     consecutive_pressure_failures = 0
     deadline = time.monotonic() + GDELT_TOTAL_BUDGET_SEC
-    universe = load_universe()
-    domains = universe.get("gdelt_domains") or []
     try:
-        for item in universe.get("gdelt_queries", []):
-            key, query = item["key"], compose_query(item["query"], domains)
+        for item in load_universe().get("gdelt_queries", []):
+            key, query = item["key"], item["query"]
             report.attempted_queries += 1
 
             remaining = deadline - time.monotonic()

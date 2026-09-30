@@ -9,11 +9,12 @@ not shown — this is the precision filter behind the "Notizie" section.
 Rules are ordered: the first topic whose pattern matches wins, so the more
 specific topics (central banks, inflation, jobs) sit before the catch-all
 "crescita". Patterns cover English and Italian, the languages of the outlets in
-``gdelt_domains``.
+``news_trusted_domains``.
 """
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 # (key, pattern). Keys are what the snapshot publishes as `headline.topic`; the
 # dashboard maps them to Italian labels.
@@ -80,3 +81,22 @@ def tidy_title(title: str | None) -> str:
 def dedupe_key(title: str | None) -> str:
     """Identity of a story across outlets and queries: its words, lower-cased."""
     return " ".join(re.findall(r"\w+", (title or "").lower()))
+
+
+def is_trusted(domain: str | None, url: str | None, trusted: list[str]) -> bool:
+    """True when the headline's host is a trusted outlet or a subdomain of one.
+
+    Uses GDELT's ``domain`` field, falling back to the URL host. Suffix match on
+    a dot boundary, so ``uk.reuters.com`` counts and ``notreuters.com`` does not.
+    """
+    host = (domain or "").strip().lower()
+    if not host and url:
+        host = (urlsplit(url).hostname or "").lower()
+    host = host.removeprefix("www.")
+    if not host:
+        return False
+    for d in trusted or []:
+        d = str(d).strip().lower()
+        if d and (host == d or host.endswith("." + d)):
+            return True
+    return False
